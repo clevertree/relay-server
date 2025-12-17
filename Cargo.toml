@@ -1,0 +1,11 @@
+[package]
+name = "relay-server"
+version = "0.3.0"
+edition = "2021"
+
+[dependencies]
+hook-transpiler = "0.2"
+
+# Server is currently under reconstruction
+# Using Docker for deployment instead
+

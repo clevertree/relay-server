@@ -1,0 +1,41 @@
+# Rust/Cargo
+target/
+**/target/
+debug/
+release/
+
+# Keep Cargo.lock committed for binaries/apps (do not ignore)
+# !Cargo.lock
+
+# OS/Editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Env files
+.env
+.env.*
+!.env.example
+
+# Logs and coverage
+*.log
+coverage/
+.nyc_output/
+
+# Node (if present in subtools)
+node_modules/
+**/node_modules/
+pnpm-lock.yaml
+yarn.lock
+package-lock.json
+pnpm-debug.log*
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Misc caches
+**/.cache/
+.parcel-cache/
+.eslintcache
+*.tsbuildinfo
