@@ -1,352 +1,57 @@
-use hook_transpiler::{transpile, version as transpiler_version, TranspileError, TranspileOptions};
-use percent_encoding::percent_decode_str;
-use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    path::PathBuf,
+    str::FromStr,
+};
+
+use relay_server::{
+    cli::{Cli, Commands},
+    git,
+    handlers,
+    helpers,
+    transpiler,
+    types::*,
+    AppState, HEADER_BRANCH, HEADER_REPO,
+};
+
+use axum::{
+    extract::{Path as AxPath, Query, State},
+    http::{HeaderMap, Request, StatusCode},
+    response::{IntoResponse, Response},
+    body::Body,
+    middleware::Next,
+    routing::{get, post},
+    Json, Router,
+};
+use axum_server::tls_rustls::RustlsConfig;
+use clap::Parser;
+use tokio::net::TcpListener;
+use tower_http::trace::TraceLayer;
+use tracing::{error, info, warn};
+use tracing_appender::rolling;
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
+use anyhow::Result;
 
 // IPFS CLI commands removed; IPFS logic is delegated to repo scripts
-
-// Serve a minimal OpenAPI YAML specification (placeholder)
-async fn get_openapi_yaml() -> impl IntoResponse {
-    let yaml = r#"openapi: 3.0.0
-info:
-  title: Relay API
-  version: 0.0.0
-paths: {}
-"#;
-    (StatusCode::OK, [("Content-Type", "application/yaml")], yaml)
-}
-
-// Serve Swagger UI HTML page
-async fn get_swagger_ui() -> impl IntoResponse {
-    let html = r#"<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="SwaggerUI" />
-    <title>SwaggerUI</title>
-    <link rel="stylesheet" href="https://unpkg.com/swagger-ui-dist@5.11.0/swagger-ui.css" />
-</head>
-<body>
-<div id="swagger-ui"></div>
-<script src="https://unpkg.com/swagger-ui-dist@5.11.0/swagger-ui-bundle.js" crossorigin></script>
-<script>
-    window.onload = () => {
-        window.ui = SwaggerUIBundle({
-            url: '/openapi.yaml',
-            dom_id: '#swagger-ui',
-            deepLinking: true,
-            presets: [
-                SwaggerUIBundle.presets.apis,
-                SwaggerUIBundle.presets.standalone
-            ],
-            plugins: [
-                SwaggerUIBundle.plugins.DownloadUrl
-            ],
-            layout: "BaseLayout"
-        });
-    };
-</script>
-</body>
-</html>"#;
-    (StatusCode::OK, [("Content-Type", "text/html")], html)
-}
-
-/// GET /api/config — returns configuration including peer list from RELAY_MASTER_PEER_LIST
-async fn get_api_config() -> impl IntoResponse {
-    #[derive(Serialize)]
-    struct Config {
-        peers: Vec<String>,
-    }
-
-    let peer_list = std::env::var("RELAY_MASTER_PEER_LIST")
-        .unwrap_or_default()
-        .split(';')
-        .map(|p| p.trim().to_string())
-        .filter(|p| !p.is_empty())
-        .collect::<Vec<_>>();
-
-    let config = Config { peers: peer_list };
-    (StatusCode::OK, Json(config))
-}
-
-/// POST /git-pull — performs git pull from origin on the bare repository
-async fn post_git_pull(State(state): State<AppState>) -> impl IntoResponse {
-    #[derive(Serialize)]
-    struct GitPullResponse {
-        success: bool,
-        message: String,
-        updated: bool,
-        before_commit: Option<String>,
-        after_commit: Option<String>,
-        error: Option<String>,
-    }
-
-    let repo_path = &state.repo_path;
-
-    match Repository::open(repo_path) {
-        Ok(repo) => {
-            // Get current HEAD commit before pulling
-            let before_commit = repo
-                .head()
-                .ok()
-                .and_then(|h| h.target())
-                .map(|oid| oid.to_string());
-
-            // Perform git fetch from origin
-            match repo.find_remote("origin") {
-                Ok(mut remote) => {
-                    match remote.fetch(&["main"], None, None) {
-                        Ok(_) => {
-                            // Fast-forward merge FETCH_HEAD to current branch
-                            let fetch_head = repo.find_reference("FETCH_HEAD");
-                            let updated = if let Ok(fetch_ref) = fetch_head {
-                                match fetch_ref.target() {
-                                    Some(fetch_oid) => {
-                                        // Get current branch reference
-                                        match repo.head() {
-                                            Ok(head_ref) => {
-                                                if let Some(head_oid) = head_ref.target() {
-                                                    // Compare commits
-                                                    if fetch_oid != head_oid {
-                                                        // Fast-forward update
-                                                        match repo.set_head_detached(fetch_oid) {
-                                                            Ok(_) => {
-                                                                // Update working directory
-                                                                match repo.checkout_head(None) {
-                                                                    Ok(_) => true,
-                                                                    Err(_) => false,
-                                                                }
-                                                            }
-                                                            Err(_) => false,
-                                                        }
-                                                    } else {
-                                                        false // No update needed
-                                                    }
-                                                } else {
-                                                    false
-                                                }
-                                            }
-                                            Err(_) => false,
-                                        }
-                                    }
-                                    None => false,
-                                }
-                            } else {
-                                false
-                            };
-
-                            // Get current HEAD commit after pulling
-                            let after_commit = repo
-                                .head()
-                                .ok()
-                                .and_then(|h| h.target())
-                                .map(|oid| oid.to_string());
-
-                            let message = if updated {
-                                format!(
-                                    "Repository updated from origin. Before: {}, After: {}",
-                                    before_commit.clone().unwrap_or_default(),
-                                    after_commit.clone().unwrap_or_default()
-                                )
-                            } else {
-                                "Repository is already up to date with origin".to_string()
-                            };
-
-                            info!("git-pull: {}", message);
-                            (
-                                StatusCode::OK,
-                                Json(GitPullResponse {
-                                    success: true,
-                                    message,
-                                    updated,
-                                    before_commit,
-                                    after_commit,
-                                    error: None,
-                                }),
-                            )
-                        }
-                        Err(e) => {
-                            let error_msg = format!("Failed to fetch from origin: {}", e);
-                            warn!("git-pull error: {}", error_msg);
-                            (
-                                StatusCode::OK,
-                                Json(GitPullResponse {
-                                    success: false,
-                                    message: error_msg.clone(),
-                                    updated: false,
-                                    before_commit,
-                                    after_commit: None,
-                                    error: Some(error_msg),
-                                }),
-                            )
-                        }
-                    }
-                }
-                Err(e) => {
-                    let error_msg = format!("Failed to find remote 'origin': {}", e);
-                    warn!("git-pull error: {}", error_msg);
-                    (
-                        StatusCode::OK,
-                        Json(GitPullResponse {
-                            success: false,
-                            message: error_msg.clone(),
-                            updated: false,
-                            before_commit,
-                            after_commit: None,
-                            error: Some(error_msg),
-                        }),
-                    )
-                }
-            }
-        }
-        Err(e) => {
-            let error_msg = format!("Failed to open repository at {:?}: {}", repo_path, e);
-            error!("git-pull error: {}", error_msg);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(GitPullResponse {
-                    success: false,
-                    message: error_msg.clone(),
-                    updated: false,
-                    before_commit: None,
-                    after_commit: None,
-                    error: Some(error_msg),
-                }),
-            )
-        }
-    }
-}
-
-/// Parse simple KEY=VALUE lines from a .env-like string. Ignores comments and blank lines.
-fn parse_dotenv(s: &str) -> std::collections::HashMap<String, String> {
-    let mut map = std::collections::HashMap::new();
-    for line in s.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        let mut parts = line.splitn(2, '=');
-        let k = parts.next().unwrap_or("").trim();
-        let v = parts.next().unwrap_or("").trim();
-        if k.is_empty() {
-            continue;
-        }
-        // Strip surrounding quotes if present
-        let val = if (v.starts_with('"') && v.ends_with('"'))
-            || (v.starts_with('\'') && v.ends_with('\''))
-        {
-            v[1..v.len().saturating_sub(1)].to_string()
-        } else {
-            v.to_string()
-        };
-        map.insert(k.to_string(), val);
-    }
-    map
-}
-
-fn ensure_bare_repo(path: &PathBuf) -> anyhow::Result<()> {
-    if path.exists() {
-        let _ = Repository::open_bare(path)?;
-        return Ok(());
-    }
-    std::fs::create_dir_all(path)?;
-    let repo = Repository::init_bare(path)?;
-    // Create an initial empty commit on main so reads have a ref
-    let sig = Signature::now("relay", "relay@local")?;
-    let tree_id = {
-        let mut index = repo.index()?;
-        index.write_tree()?
-    };
-    let tree = repo.find_tree(tree_id)?;
-    let commit_id = repo.commit(
-        Some("refs/heads/main"),
-        &sig,
-        &sig,
-        "Initial commit",
-        &tree,
-        &[],
-    )?;
-    info!(?commit_id, "Initialized bare repo with main branch");
-    Ok(())
-}
-
-// Removed legacy /status response model — discovery moved under OPTIONS
-
-#[derive(Deserialize)]
-struct RulesDoc {
-    #[serde(default, rename = "indexFile")]
-    index_file: Option<String>,
-}
-
-#[derive(Deserialize, Debug, Serialize)]
-struct RelayConfig {
-    #[serde(default)]
-    client: ClientConfig,
-    #[serde(default)]
-    server: Option<serde_json::Value>,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    version: Option<String>,
-    #[serde(default)]
-    description: Option<String>,
-}
-
-#[derive(Deserialize, Debug, Default, Serialize)]
-struct ClientConfig {
-    #[serde(default)]
-    hooks: HooksConfig,
-}
-
-#[derive(Deserialize, Debug, Default, Serialize)]
-struct HooksConfig {
-    #[serde(default)]
-    get: Option<HookPath>,
-    #[serde(default)]
-    query: Option<HookPath>,
-}
-
-#[derive(Deserialize, Debug, Serialize)]
-struct HookPath {
-    path: String,
-}
-
-/// Read .relay.yaml configuration from git tree for the given branch
-fn read_relay_config(repo: &Repository, branch: &str) -> Option<RelayConfig> {
-    let branch_ref = format!("refs/heads/{}", branch);
-    let obj = repo.revparse_single(&branch_ref).ok()?;
-    let commit = obj.as_commit()?;
-    let tree = commit.tree().ok()?;
-
-    let entry = tree.get_name(".relay.yaml")?;
-    let obj = entry.to_object(repo).ok()?;
-    let blob = obj.as_blob()?;
-    let content = std::str::from_utf8(blob.content()).ok()?;
-    serde_yaml::from_str(content).ok()
-}
-
-// Removed legacy /status endpoint handler
 
 /// OPTIONS handler — discovery: capabilities, branches, repos, current selections, client hooks
 async fn options_capabilities(
     State(state): State<AppState>,
     headers: HeaderMap,
-    query: Option<Query<HashMap<String, String>>>,
+    _query: Option<Query<HashMap<String, String>>>,
 ) -> impl IntoResponse {
-    // Resolve selection strictly: branch from header or default; repo from header or subdomain or first available
-    let branch = branch_from(&headers);
-    let repo_name = strict_repo_from(&state.repo_path, &headers);
+    let branch = helpers::branch_from(&headers);
+    let repo_name = helpers::strict_repo_from(&state.repo_path, &headers);
 
-    // Enumerate repos under root and their branches/heads
-    let repo_names = bare_repo_names(&state.repo_path);
+    let repo_names = git::bare_repo_names(&state.repo_path);
     let mut repos_json: Vec<serde_json::Value> = Vec::new();
-    let mut branches_for_current: Vec<String> = Vec::new();
     let mut relay_config: Option<RelayConfig> = None;
 
     for name in &repo_names {
-        if let Some(repo) = open_repo(&state.repo_path, name) {
+        if let Some(repo) = git::open_repo(&state.repo_path, name) {
             let mut heads_map = serde_json::Map::new();
-            let branches = list_branches(&repo);
+            let branches = helpers::list_branches(&repo);
             for b in &branches {
                 if let Ok(reference) = repo.find_reference(&format!("refs/heads/{}", b)) {
                     if let Ok(commit) = reference.peel_to_commit() {
@@ -355,10 +60,8 @@ async fn options_capabilities(
                 }
             }
             if Some(name) == repo_name.as_ref() {
-                branches_for_current = branches.clone();
-                // Load .relay.yaml from the current repo/branch for client hooks
                 if relay_config.is_none() {
-                    relay_config = read_relay_config(&repo, &branch);
+                    relay_config = git::read_relay_config(&repo, &branch);
                 }
             }
             repos_json.push(serde_json::json!({
@@ -377,7 +80,6 @@ async fn options_capabilities(
         "currentRepo": repo_name.clone().unwrap_or_default(),
     });
 
-    // Merge relay configuration (client hooks, etc.) if available
     if let Some(config) = relay_config {
         if let Ok(config_json) = serde_json::to_value(&config) {
             if let Some(obj) = body.as_object_mut() {
@@ -406,153 +108,13 @@ async fn options_capabilities(
 }
 
 /// List all local branches with their HEAD commit ids
-// Helpers for strict multi-repo support
-fn bare_repo_names(root: &PathBuf) -> Vec<String> {
-    let mut names = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(root) {
-        for e in rd.flatten() {
-            if e.file_type().map(|ft| ft.is_dir()).unwrap_or(false) {
-                let p = e.path();
-                if let Some(name) = p.file_name().and_then(|s| s.to_str()) {
-                    if name.ends_with(".git") {
-                        names.push(name.trim_end_matches(".git").to_string());
-                    }
-                }
-            }
-        }
-    }
-    names.sort();
-    names
-}
-
-fn open_repo(root: &PathBuf, name: &str) -> Option<Repository> {
-    let p = root.join(format!("{}.git", name));
-    Repository::open_bare(p).ok()
-}
-
-fn strict_repo_from(root: &PathBuf, headers: &HeaderMap) -> Option<String> {
-    // Header first
-    if let Some(h) = headers.get(HEADER_REPO).and_then(|v| v.to_str().ok()) {
-        let name = h.trim().trim_matches('/');
-        if !name.is_empty() {
-            let name = name.to_string();
-            if bare_repo_names(root).iter().any(|n| n == &name) {
-                return Some(name);
-            }
-        }
-    }
-    // Sub-subdomain: first label in host if there are 3+ labels
-    if let Some(host) = headers.get("host").and_then(|v| v.to_str().ok()) {
-        let host = host.split(':').next().unwrap_or(host); // strip port
-        let parts: Vec<&str> = host.split('.').collect();
-        if parts.len() >= 3 {
-            let candidate = parts[0].to_string();
-            if bare_repo_names(root).iter().any(|n| n == &candidate) {
-                return Some(candidate);
-            }
-        }
-    }
-    // Default: first available
-    bare_repo_names(root).into_iter().next()
-}
-
-// QueryRequest/Response handled entirely by repo script (hooks/query.mjs)
-
-async fn post_query(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Option<Json<serde_json::Value>>,
-) -> impl IntoResponse {
-    // Resolve selection strictly
-    let branch = headers
-        .get(HEADER_BRANCH)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or(DEFAULT_BRANCH)
-        .to_string();
-    let repo_name = match strict_repo_from(&state.repo_path, &headers) {
-        Some(n) => n,
-        None => return (StatusCode::NOT_FOUND, "Repository not found").into_response(),
-    };
-    let input_json = body.map(|Json(v)| v).unwrap_or(serde_json::json!({}));
-
-    // Load hooks/query.mjs from branch
-    let repo = match open_repo(&state.repo_path, &repo_name) {
-        Some(r) => r,
-        None => return (StatusCode::NOT_FOUND, "Repository not found").into_response(),
-    };
-    let refname = format!("refs/heads/{}", branch);
-    let commit = match repo
-        .find_reference(&refname)
-        .and_then(|r| r.peel_to_commit())
-    {
-        Ok(c) => c,
-        Err(_) => return (StatusCode::NOT_FOUND, "branch not found").into_response(),
-    };
-    let tree = match commit.tree() {
-        Ok(t) => t,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-    let entry = match tree.get_path(std::path::Path::new("hooks/query.mjs")) {
-        Ok(e) => e,
-        Err(_) => return (StatusCode::BAD_REQUEST, "hooks/query.mjs not found").into_response(),
-    };
-    let blob = match entry.to_object(&repo).and_then(|o| o.peel_to_blob()) {
-        Ok(b) => b,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-    let tmp = std::env::temp_dir().join(format!("relay-query-{}-{}.mjs", branch, commit.id()));
-    if let Err(e) = std::fs::write(&tmp, blob.content()) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-    }
-    let node_bin = std::env::var("RELAY_NODE_BIN").unwrap_or_else(|_| "node".to_string());
-    let mut cmd = std::process::Command::new(node_bin);
-    cmd.arg(&tmp)
-        .env("GIT_DIR", repo.path())
-        .env("BRANCH", &branch)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    if let Ok(mut child) = cmd.spawn() {
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = std::io::Write::write_all(&mut stdin, input_json.to_string().as_bytes());
-        }
-        match child.wait_with_output() {
-            Ok(output) => {
-                let _ = std::fs::remove_file(&tmp);
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    return (StatusCode::BAD_REQUEST, stderr.to_string()).into_response();
-                }
-                match serde_json::from_slice::<serde_json::Value>(&output.stdout) {
-                    Ok(v) => (
-                        StatusCode::OK,
-                        [
-                            ("Content-Type", "application/json".to_string()),
-                            (HEADER_BRANCH, branch),
-                        ],
-                        Json(v),
-                    )
-                        .into_response(),
-                    Err(e) => (
-                        StatusCode::BAD_REQUEST,
-                        format!("query.mjs returned invalid JSON: {}", e),
-                    )
-                        .into_response(),
-                }
-            }
-            Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-        }
-    } else {
-        (StatusCode::INTERNAL_SERVER_ERROR, "failed to spawn node").into_response()
-    }
-}
+// Helpers for strict multi-repo support - see helpers module
 
 // removed SQLite row_to_json helper
 
 // Legacy exhaustive tests for the server. Disabled by default to keep the
-// build green while we iterate on the new transpiler. Enable with
-// `--features server_full_tests` when running tests.
-#[cfg(all(test, feature = "server_full_tests"))]
+// build green while we iterate on the new transpiler.
+#[cfg(test)]
 mod tests {
     use super::*;
     use git2::{Repository, Signature};
@@ -560,15 +122,6 @@ mod tests {
     use std::path::Path as FsPath;
     use std::time::Duration as StdDuration;
     use tempfile::tempdir;
-
-    #[test]
-    fn test_md_to_html_bytes_basic() {
-        let md = b"# Hello\n\nThis is *markdown*.";
-        let html = md_to_html_bytes(md);
-        let s = String::from_utf8(html).expect("utf8");
-        assert!(s.contains("<h1>"));
-        assert!(s.contains("<em>markdown</em>"));
-    }
 
     #[test]
     fn test_row_to_json_basic_types_removed() {}
@@ -1223,7 +776,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert(HEADER_BRANCH, "develop".parse().unwrap());
 
-        let branch = branch_from(&headers);
+        let branch = helpers::branch_from(&headers);
         assert_eq!(branch, "develop");
     }
 
@@ -1232,7 +785,7 @@ mod tests {
     fn test_branch_from_default() {
         let headers = HeaderMap::new();
 
-        let branch = branch_from(&headers);
+        let branch = helpers::branch_from(&headers);
         assert_eq!(branch, DEFAULT_BRANCH);
     }
 
@@ -1254,7 +807,7 @@ mod tests {
             .unwrap();
 
         let headers = HeaderMap::new();
-        let selected = strict_repo_from(&repo_dir.path().to_path_buf(), &headers);
+        let selected = helpers::strict_repo_from(&repo_dir.path().to_path_buf(), &headers);
 
         assert_eq!(selected, Some("repo".to_string()));
     }
@@ -1266,7 +819,7 @@ mod tests {
         let _ = std::fs::create_dir_all(repo_dir.path());
 
         let headers = HeaderMap::new();
-        let selected = strict_repo_from(&repo_dir.path().to_path_buf(), &headers);
+        let selected = helpers::strict_repo_from(&repo_dir.path().to_path_buf(), &headers);
 
         assert_eq!(selected, None);
     }
@@ -1282,7 +835,7 @@ mod tests {
         // Create a non-bare directory (should be ignored)
         std::fs::create_dir(repo_dir.path().join("not_a_repo")).unwrap();
 
-        let names = bare_repo_names(&repo_dir.path().to_path_buf());
+        let names = git::bare_repo_names(&repo_dir.path().to_path_buf());
 
         assert_eq!(names, vec!["repo1".to_string(), "repo2".to_string()]);
     }
@@ -1297,7 +850,7 @@ mod tests {
         };
 
         let headers = HeaderMap::new();
-        let response = head_root(State(state), headers, None).await;
+        let response = handlers::head_root(State(state), headers, None).await;
         let (parts, _body) = response.into_response().into_parts();
 
         assert_eq!(parts.status, StatusCode::NO_CONTENT);
@@ -1333,8 +886,7 @@ mod tests {
         headers.insert(HEADER_BRANCH, "main".parse().unwrap());
         headers.insert(HEADER_REPO, "repo".parse().unwrap());
 
-        let response =
-            head_file(State(state), headers, AxPath("hello.txt".to_string()), None).await;
+        let response = handlers::head_file(State(state), headers, AxPath("hello.txt".to_string()), None).await;
         let (parts, body) = response.into_response().into_parts();
 
         assert_eq!(parts.status, StatusCode::OK);
@@ -1373,7 +925,7 @@ mod tests {
         headers.insert(HEADER_BRANCH, "main".parse().unwrap());
         headers.insert(HEADER_REPO, "repo".parse().unwrap());
 
-        let response = head_file(
+        let response = handlers::head_file(
             State(state),
             headers,
             AxPath("missing.txt".to_string()),
@@ -1400,288 +952,14 @@ mod tests {
         headers.insert(HEADER_BRANCH, "main".parse().unwrap());
         headers.insert(HEADER_REPO, "nonexistent".parse().unwrap());
 
-        let response = head_file(State(state), headers, AxPath("file.txt".to_string()), None).await;
+        let response = handlers::head_file(State(state), headers, AxPath("file.txt".to_string()), None).await;
         let (parts, _body) = response.into_response().into_parts();
 
         assert_eq!(parts.status, StatusCode::NOT_FOUND);
     }
 }
 
-// No disallowed file types — reads and writes are permitted for all paths.
-
-fn branch_from(headers: &HeaderMap) -> String {
-    if let Some(h) = headers.get(HEADER_BRANCH).and_then(|v| v.to_str().ok()) {
-        if !h.is_empty() {
-            return h.to_string();
-        }
-    }
-    DEFAULT_BRANCH.to_string()
-}
-
-fn sanitize_repo_name(name: &str) -> Option<String> {
-    let trimmed = name.trim().trim_matches('/');
-    if trimmed.is_empty() {
-        return None;
-    }
-    if trimmed.contains("..") {
-        return None;
-    }
-    Some(trimmed.to_string())
-}
-
-// old repo_from removed in favor of strict_repo_from()
-
-// list_repos removed — repos are now separate bare repositories under the repo root
-
-async fn get_file(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    AxPath(path): AxPath<String>,
-    query: Option<Query<HashMap<String, String>>>,
-) -> impl IntoResponse {
-    info!(%path, "get_file called");
-    let decoded = url_decode(&path).decode_utf8_lossy().to_string();
-    info!(decoded = %decoded, "decoded path");
-    // 1) Resolve GIT first (when a repo is selected). If no repo header/subdomain was provided,
-    // try serving from static paths directly so client-web assets under root work without repo context.
-    let branch = branch_from(&headers);
-    let repo_name_opt = strict_repo_from(&state.repo_path, &headers);
-    let repo_name: String;
-    if repo_name_opt.is_none() {
-        // No repo selected: treat as Git 404, then attempt static for the same path
-        if let Some(resp) = try_static(&state, &decoded).await {
-            return resp;
-        }
-        return (
-            StatusCode::NOT_FOUND,
-            [
-                ("Content-Type", "text/plain".to_string()),
-                (HEADER_BRANCH, branch.clone()),
-                (HEADER_REPO, "".to_string()),
-            ],
-            "Not Found".to_string(),
-        )
-            .into_response();
-    } else {
-        repo_name = repo_name_opt.unwrap();
-    }
-    let normalized_path = decoded.trim_start_matches('/').to_string();
-
-    if should_transpile_request(&headers, &query) && is_transpilable_hook_path(&normalized_path) {
-        if let Some(transpiled) =
-            transpile_hook_file(&state.repo_path, &branch, &repo_name, &normalized_path)
-        {
-            return transpiled;
-        }
-    }
-
-    info!(%branch, "resolved branch");
-
-    // Resolve via Git first for all file types
-    let git_result =
-        git_resolve_and_respond(&state.repo_path, &headers, &branch, &repo_name, &decoded);
-    match git_result {
-        GitResolveResult::Respond(resp) => return resp,
-        GitResolveResult::NotFound(rel_missing) => {
-            // 2) Git miss: delegate to repo get script (hooks/get.mjs)
-            let hook_resp = run_get_script_or_404(&state, &branch, &repo_name, &rel_missing).await;
-            if hook_resp.status() != StatusCode::NOT_FOUND {
-                return hook_resp;
-            }
-            // 3) Static fallback only after Git+hook 404
-            if let Some(resp) = try_static(&state, &decoded).await {
-                return resp;
-            }
-            return hook_resp; // 404
-        }
-    }
-}
-
-async fn run_get_script_or_404(
-    state: &AppState,
-    branch: &str,
-    repo_name: &str,
-    rel_missing: &str,
-) -> Response {
-    // Load hooks/get.mjs from branch
-    let repo = match open_repo(&state.repo_path, repo_name) {
-        Some(r) => r,
-        None => return (StatusCode::INTERNAL_SERVER_ERROR, "Repository not found").into_response(),
-    };
-    let refname = format!("refs/heads/{}", branch);
-    let commit = match repo
-        .find_reference(&refname)
-        .and_then(|r| r.peel_to_commit())
-    {
-        Ok(c) => c,
-        Err(_) => return (StatusCode::NOT_FOUND, "Not Found").into_response(),
-    };
-    let tree = match commit.tree() {
-        Ok(t) => t,
-        Err(_) => return (StatusCode::NOT_FOUND, "Not Found").into_response(),
-    };
-    let entry = match tree.get_path(std::path::Path::new("hooks/get.mjs")) {
-        Ok(e) => e,
-        Err(_) => return (StatusCode::NOT_FOUND, "Not Found").into_response(),
-    };
-    let blob = match entry.to_object(&repo).and_then(|o| o.peel_to_blob()) {
-        Ok(b) => b,
-        Err(_) => return (StatusCode::NOT_FOUND, "Not Found").into_response(),
-    };
-    let tmp = std::env::temp_dir().join(format!("relay-get-{}-{}.mjs", branch, commit.id()));
-    if let Err(e) = std::fs::write(&tmp, blob.content()) {
-        error!(?e, "failed to write get.mjs temp file");
-        return (StatusCode::NOT_FOUND, "Not Found").into_response();
-    }
-    let node_bin = std::env::var("RELAY_NODE_BIN").unwrap_or_else(|_| "node".to_string());
-    let mut cmd = std::process::Command::new(node_bin);
-    cmd.arg(&tmp)
-        .env("GIT_DIR", repo.path())
-        .env("BRANCH", branch)
-        .env("REL_PATH", rel_missing)
-        .env(
-            "CACHE_ROOT",
-            std::env::var("RELAY_IPFS_CACHE_ROOT")
-                .unwrap_or_else(|_| DEFAULT_IPFS_CACHE_ROOT.to_string()),
-        )
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-    let output = match cmd.output() {
-        Ok(o) => o,
-        Err(e) => {
-            error!(?e, "failed to execute get.mjs");
-            let _ = std::fs::remove_file(&tmp);
-            return (StatusCode::NOT_FOUND, "Not Found").into_response();
-        }
-    };
-    let _ = std::fs::remove_file(&tmp);
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        warn!(%stderr, "get.mjs non-success status");
-        return (StatusCode::NOT_FOUND, "Not Found").into_response();
-    }
-    let val: serde_json::Value = match serde_json::from_slice(&output.stdout) {
-        Ok(v) => v,
-        Err(e) => {
-            warn!(?e, "get.mjs returned invalid JSON");
-            return (StatusCode::NOT_FOUND, "Not Found").into_response();
-        }
-    };
-    let kind = val.get("kind").and_then(|k| k.as_str()).unwrap_or("");
-    match kind {
-        "file" => {
-            let ct = val
-                .get("contentType")
-                .and_then(|v| v.as_str())
-                .unwrap_or("application/octet-stream");
-            let b64 = val.get("bodyBase64").and_then(|v| v.as_str()).unwrap_or("");
-            match general_purpose::STANDARD.decode(b64.as_bytes()) {
-                Ok(bytes) => (
-                    StatusCode::OK,
-                    [
-                        ("Content-Type", ct.to_string()),
-                        (HEADER_BRANCH, branch.to_string()),
-                        (HEADER_REPO, repo_name.to_string()),
-                    ],
-                    bytes,
-                )
-                    .into_response(),
-                Err(e) => {
-                    warn!(?e, "failed to decode get.mjs bodyBase64");
-                    (StatusCode::NOT_FOUND, "Not Found").into_response()
-                }
-            }
-        }
-        "dir" => (
-            StatusCode::OK,
-            [
-                ("Content-Type", "application/json".to_string()),
-                (HEADER_BRANCH, branch.to_string()),
-                (HEADER_REPO, repo_name.to_string()),
-            ],
-            Json(val),
-        )
-            .into_response(),
-        _ => (StatusCode::NOT_FOUND, "Not Found").into_response(),
-    }
-}
-
-// Try to serve a file from configured static directories. Returns Some(response) on success, None to continue.
-async fn try_static(state: &AppState, decoded: &str) -> Option<Response> {
-    if state.static_paths.is_empty() {
-        return None;
-    }
-    // Prevent path traversal: normalize to components and re-join with '/'
-    let mut rel = String::new();
-    for part in decoded.split('/') {
-        if part.is_empty() || part == "." || part == ".." {
-            continue;
-        }
-        if !rel.is_empty() {
-            rel.push('/');
-        }
-        rel.push_str(part);
-    }
-    if rel.is_empty() {
-        return None;
-    }
-    for base in &state.static_paths {
-        let candidate = base.join(rel.replace('/', std::path::MAIN_SEPARATOR.to_string().as_str()));
-        // Ensure candidate stays within base
-        if let (Ok(canon_base), Ok(canon_file)) = (base.canonicalize(), candidate.canonicalize()) {
-            if !canon_file.starts_with(&canon_base) {
-                continue;
-            }
-        }
-        if candidate.is_file() {
-            match tokio::fs::read(&candidate).await {
-                Ok(bytes) => {
-                    let ct = mime_guess::from_path(&candidate)
-                        .first_or_octet_stream()
-                        .essence_str()
-                        .to_string();
-                    // Add basic cache headers for static assets
-                    let mut resp =
-                        (StatusCode::OK, [("Content-Type", ct.clone())], bytes).into_response();
-                    let headers = resp.headers_mut();
-                    headers.insert(
-                        axum::http::header::CACHE_CONTROL,
-                        axum::http::HeaderValue::from_static("public, max-age=3600"),
-                    );
-                    headers.insert(
-                        axum::http::header::ACCESS_CONTROL_ALLOW_ORIGIN,
-                        axum::http::HeaderValue::from_static("*"),
-                    );
-                    return Some(resp);
-                }
-                Err(e) => {
-                    warn!(?e, path=%candidate.to_string_lossy(), "Failed to read static file");
-                }
-            }
-        }
-        // Do not fallback to index.html for arbitrary 404s.
-    }
-    None
-}
-
-async fn serve_acme_challenge(base_dir: &str, subpath: &str) -> Response {
-    // Sanitize subpath
-    let rel = subpath
-        .split('/')
-        .filter(|p| !p.is_empty() && *p != "." && *p != "..")
-        .collect::<Vec<_>>()
-        .join("/");
-    if rel.is_empty() {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    let path = PathBuf::from(base_dir).join(rel);
-    match tokio::fs::read(&path).await {
-        Ok(bytes) => (StatusCode::OK, [("Content-Type", "text/plain")], bytes).into_response(),
-        Err(_) => StatusCode::NOT_FOUND.into_response(),
-    }
-}
-
-async fn load_rustls_config(cert_path: &str, key_path: &str) -> anyhow::Result<RustlsConfig> {
+async fn load_rustls_config(cert_path: &str, key_path: &str) -> Result<RustlsConfig> {
     // Read files as raw bytes and pass to RustlsConfig::from_pem which expects Vec<u8>
     let cert_bytes = tokio::fs::read(cert_path).await?;
     let key_bytes = tokio::fs::read(key_path).await?;
@@ -1689,126 +967,6 @@ async fn load_rustls_config(cert_path: &str, key_path: &str) -> anyhow::Result<R
     // from_pem is async and returns io::Result<RustlsConfig>
     let config = RustlsConfig::from_pem(cert_bytes, key_bytes).await?;
     Ok(config)
-}
-
-enum GitResolveResult {
-    Respond(Response),
-    NotFound(String),
-}
-
-fn git_resolve_and_respond(
-    repo_root: &PathBuf,
-    headers: &HeaderMap,
-    branch: &str,
-    repo_name: &str,
-    decoded: &str,
-) -> GitResolveResult {
-    let repo = match open_repo(repo_root, repo_name) {
-        Some(r) => r,
-        None => {
-            error!("open repo error: repo not found");
-            return GitResolveResult::Respond(StatusCode::INTERNAL_SERVER_ERROR.into_response());
-        }
-    };
-    let refname = format!("refs/heads/{}", branch);
-    let reference = match repo.find_reference(&refname) {
-        Ok(r) => r,
-        Err(_) => {
-            return GitResolveResult::NotFound(decoded.to_string());
-        }
-    };
-    let commit = match reference.peel_to_commit() {
-        Ok(c) => c,
-        Err(e) => {
-            error!(?e, "peel to commit error");
-            return GitResolveResult::Respond(StatusCode::INTERNAL_SERVER_ERROR.into_response());
-        }
-    };
-    let tree = match commit.tree() {
-        Ok(t) => t,
-        Err(e) => {
-            error!(?e, "tree error");
-            return GitResolveResult::Respond(StatusCode::INTERNAL_SERVER_ERROR.into_response());
-        }
-    };
-
-    // Path is used directly inside the selected repository
-    let rel = decoded.trim_matches('/');
-
-    // Empty path -> delegate to repo script (hooks/get.mjs)
-    if rel.is_empty() {
-        return GitResolveResult::NotFound(rel.to_string());
-    }
-
-    // File/dir resolution
-    let path_obj = std::path::Path::new(rel);
-    let entry = match tree.get_path(path_obj) {
-        Ok(e) => e,
-        Err(_) => return GitResolveResult::NotFound(rel.to_string()),
-    };
-
-    match entry.kind() {
-        Some(ObjectType::Blob) => match repo.find_blob(entry.id()) {
-            Ok(blob) => {
-                let ct = mime_guess::from_path(rel)
-                    .first_or_octet_stream()
-                    .essence_str()
-                    .to_string();
-                let resp = (
-                    StatusCode::OK,
-                    [
-                        ("Content-Type", ct),
-                        (HEADER_BRANCH, branch.to_string()),
-                        (HEADER_REPO, repo_name.to_string()),
-                    ],
-                    blob.content().to_vec(),
-                )
-                    .into_response();
-                GitResolveResult::Respond(resp)
-            }
-            Err(e) => {
-                error!(?e, "blob read error");
-                GitResolveResult::Respond(StatusCode::INTERNAL_SERVER_ERROR.into_response())
-            }
-        },
-        Some(ObjectType::Tree) => {
-            // List directory contents as JSON
-            match repo.find_tree(entry.id()) {
-                Ok(dir_tree) => {
-                    let mut entries = serde_json::json!({});
-                    for item in dir_tree.iter() {
-                        if let Some(name) = item.name() {
-                            let kind = match item.kind() {
-                                Some(ObjectType::Blob) => "file",
-                                Some(ObjectType::Tree) => "dir",
-                                _ => "unknown",
-                            };
-                            entries[name] = serde_json::json!({
-                                "type": kind,
-                                "path": format!("{}/{}", rel, name)
-                            });
-                        }
-                    }
-                    let resp = (
-                        StatusCode::OK,
-                        [
-                            ("Content-Type", "application/json".to_string()),
-                            (HEADER_BRANCH, branch.to_string()),
-                            (HEADER_REPO, repo_name.to_string()),
-                        ],
-                        serde_json::to_string(&entries).unwrap_or_else(|_| "{}".to_string()),
-                    )
-                        .into_response();
-                    GitResolveResult::Respond(resp)
-                }
-                Err(e) => {
-                    error!(?e, "tree read error");
-                    GitResolveResult::Respond(StatusCode::INTERNAL_SERVER_ERROR.into_response())
-                }
-            }
-        }
-        _ => GitResolveResult::NotFound(rel.to_string()),
-    }
 }
 
 // IPFS fallback removed; IPFS logic is delegated to repo scripts (hooks/get.mjs)
@@ -1819,119 +977,10 @@ async fn get_root(
     _query: Option<Query<HashMap<String, String>>>,
 ) -> impl IntoResponse {
     // Try serving SPA index.html from configured static paths
-    if let Some(resp) = try_static(&state, "index.html").await {
+    if let Some(resp) = handlers::try_static(&state, "index.html").await {
         return resp;
     }
     StatusCode::NOT_FOUND.into_response()
-}
-
-/// HEAD / - returns same headers as GET but no body. Returns 204 No Content.
-async fn head_root(
-    State(state): State<AppState>,
-    _headers: HeaderMap,
-    _query: Option<Query<HashMap<String, String>>>,
-) -> impl IntoResponse {
-    // If index exists, signal 200 without body
-    if let Some(resp) = try_static(&state, "index.html").await {
-        let (parts, _body) = resp.into_parts();
-        if parts.status == StatusCode::OK {
-            return StatusCode::OK.into_response();
-        }
-    }
-    StatusCode::NOT_FOUND.into_response()
-}
-
-/// HEAD handler for files. Returns same headers as GET but no body.
-/// Returns 200 if file exists, 404 if not found or repo doesn't exist.
-async fn head_file(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    AxPath(path): AxPath<String>,
-    _query: Option<Query<HashMap<String, String>>>,
-) -> impl IntoResponse {
-    let decoded = url_decode(&path).decode_utf8_lossy().to_string();
-
-    let branch = branch_from(&headers);
-    let repo_name_opt = strict_repo_from(&state.repo_path, &headers);
-    let repo_name: String;
-    if repo_name_opt.is_none() {
-        // No repo selected: treat as Git 404 and check static for existence
-        if let Some(resp) = try_static(&state, &decoded).await {
-            let (parts, _body) = resp.into_parts();
-            if parts.status == StatusCode::OK {
-                return (
-                    StatusCode::OK,
-                    [
-                        (
-                            "Content-Type",
-                            parts
-                                .headers
-                                .get("Content-Type")
-                                .and_then(|h| h.to_str().ok())
-                                .unwrap_or("application/octet-stream")
-                                .to_string(),
-                        ),
-                        (HEADER_BRANCH, branch.clone()),
-                        (HEADER_REPO, "".to_string()),
-                    ],
-                )
-                    .into_response();
-            }
-        }
-        return (
-            StatusCode::NOT_FOUND,
-            [
-                ("Content-Type", "text/plain".to_string()),
-                (HEADER_BRANCH, branch.clone()),
-                (HEADER_REPO, "".to_string()),
-            ],
-        )
-            .into_response();
-    } else {
-        repo_name = repo_name_opt.unwrap();
-    }
-
-    // Resolve via Git - if found, return headers without body
-    match git_resolve_and_respond(&state.repo_path, &headers, &branch, &repo_name, &decoded) {
-        GitResolveResult::Respond(resp) => {
-            // If GET would have succeeded, return 200 with same headers but no body
-            let (parts, _body) = resp.into_parts();
-            if parts.status == StatusCode::OK {
-                (
-                    StatusCode::OK,
-                    [
-                        (
-                            "Content-Type",
-                            parts
-                                .headers
-                                .get("Content-Type")
-                                .and_then(|h| h.to_str().ok())
-                                .unwrap_or("application/octet-stream")
-                                .to_string(),
-                        ),
-                        (HEADER_BRANCH, branch),
-                        (HEADER_REPO, repo_name),
-                    ],
-                )
-                    .into_response()
-            } else {
-                // Return same status as GET would
-                StatusCode::NOT_FOUND.into_response()
-            }
-        }
-        GitResolveResult::NotFound(_) => {
-            // File not found in Git - return 404 without checking hooks
-            (
-                StatusCode::NOT_FOUND,
-                [
-                    ("Content-Type", "text/plain".to_string()),
-                    (HEADER_BRANCH, branch),
-                    (HEADER_REPO, repo_name),
-                ],
-            )
-                .into_response()
-        }
-    }
 }
 
 /// Append permissive CORS headers to all responses without short-circuiting OPTIONS.
@@ -1957,648 +1006,177 @@ async fn cors_headers(req: Request<Body>, next: Next) -> Response {
     res
 }
 
-async fn put_file(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    AxPath(path): AxPath<String>,
-    query: Option<Query<HashMap<String, String>>>,
-    body: Bytes,
-) -> impl IntoResponse {
-    let decoded = url_decode(&path).decode_utf8_lossy().to_string();
-    // All file types allowed for writes
-    let branch = branch_from(&headers);
-    let repo_name = match strict_repo_from(&state.repo_path, &headers) {
-        Some(r) => r,
-        None => {
-            return (
-                StatusCode::NOT_FOUND,
-                Json(serde_json::json!({"error": "Repository not found"})),
-            )
-                .into_response();
-        }
-    };
-    match write_file_to_repo(&state.repo_path, &repo_name, &branch, &decoded, &body) {
-        Ok((commit, branch)) => {
-            Json(serde_json::json!({"commit": commit, "branch": branch, "path": decoded}))
-                .into_response()
-        }
-        Err(e) => {
-            error!(?e, "write error");
-            let msg = e.to_string();
-            if msg.contains("rejected by") || msg.contains("validation failed") {
-                (StatusCode::BAD_REQUEST, msg).into_response()
-            } else {
-                (StatusCode::INTERNAL_SERVER_ERROR, msg).into_response()
+#[tokio::main]
+async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    // Set up logging: stdout + rolling file appender
+    let _ = std::fs::create_dir_all("logs");
+    let file_appender = rolling::daily("logs", "server.log");
+    let (file_nb, _guard) = tracing_appender::non_blocking(file_appender);
+    let env_filter = tracing_subscriber::EnvFilter::from_default_env();
+    let stdout_layer = fmt::layer()
+        .with_target(true)
+        .with_thread_ids(false)
+        .with_thread_names(false)
+        .compact();
+    let file_layer = fmt::layer()
+        .with_writer(file_nb)
+        .with_target(true)
+        .compact();
+    tracing_subscriber::registry()
+        .with(env_filter)
+        .with(stdout_layer)
+        .with(file_layer)
+        .init();
+
+    // Determine serve args from CLI/env
+    let (repo_path, mut static_paths, bind_cli): (PathBuf, Vec<PathBuf>, Option<String>) =
+        match cli.command {
+            Some(Commands::Serve(sa)) => {
+                let rp = sa
+                    .repo
+                    .or_else(|| std::env::var("RELAY_REPO_PATH").ok().map(PathBuf::from))
+                    .unwrap_or_else(|| PathBuf::from("data"));
+                (rp, sa.static_paths, sa.bind)
             }
-        }
-    }
-}
-
-async fn delete_file(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    AxPath(path): AxPath<String>,
-    query: Option<Query<HashMap<String, String>>>,
-) -> impl IntoResponse {
-    let decoded = url_decode(&path).decode_utf8_lossy().to_string();
-    // All file types allowed for deletes
-    let branch = branch_from(&headers);
-    let repo_name = match strict_repo_from(&state.repo_path, &headers) {
-        Some(r) => r,
-        None => return StatusCode::NOT_FOUND.into_response(),
-    };
-    match delete_file_in_repo(&state.repo_path, &repo_name, &branch, &decoded) {
-        Ok((commit, branch)) => {
-            Json(serde_json::json!({"commit": commit, "branch": branch, "path": decoded}))
-                .into_response()
-        }
-        Err(ReadError::NotFound) => StatusCode::NOT_FOUND.into_response(),
-        Err(e) => {
-            error!(?e, "delete error");
-            (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
-        }
-    }
-}
-
-#[derive(Debug, Error)]
-enum ReadError {
-    #[error("not found")]
-    NotFound,
-    #[error(transparent)]
-    Other(#[from] anyhow::Error),
-}
-
-fn list_branches(repo: &Repository) -> Vec<String> {
-    let mut out = vec![];
-    if let Ok(mut iter) = repo.branches(None) {
-        while let Some(Ok((b, _))) = iter.next() {
-            if let Ok(name) = b.name() {
-                if let Some(s) = name {
-                    out.push(s.to_string());
-                }
-            }
-        }
-    }
-    out
-}
-
-/// Minimal URL percent-decoder wrapper used by handlers.
-/// Returns a percent-decoder so callers can choose utf8 lossless decoding.
-fn url_decode(input: &str) -> percent_encoding::PercentDecode {
-    percent_decode_str(input)
-}
-
-fn read_file_from_repo(
-    repo_path: &PathBuf,
-    branch: &str,
-    path: &str,
-) -> Result<Vec<u8>, ReadError> {
-    let repo = Repository::open_bare(repo_path).map_err(|e| ReadError::Other(e.into()))?;
-    let refname = format!("refs/heads/{}", branch);
-    let reference = repo
-        .find_reference(&refname)
-        .map_err(|_| ReadError::NotFound)?;
-    let commit = reference
-        .peel_to_commit()
-        .map_err(|_| ReadError::NotFound)?;
-    let tree = commit.tree().map_err(|e| ReadError::Other(e.into()))?;
-    let entry = tree
-        .get_path(std::path::Path::new(path))
-        .map_err(|_| ReadError::NotFound)?;
-    let blob = repo
-        .find_blob(entry.id())
-        .map_err(|e| ReadError::Other(e.into()))?;
-    Ok(blob.content().to_vec())
-}
-
-fn parse_bool_like(value: &str) -> bool {
-    matches!(
-        value.to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
-}
-
-fn should_transpile_request(
-    headers: &HeaderMap,
-    query: &Option<Query<HashMap<String, String>>>,
-) -> bool {
-    if let Some(q) = query {
-        if let Some(val) = q.get("transpile") {
-            if parse_bool_like(val) {
-                return true;
-            }
-        }
-    }
-    if let Some(header) = headers
-        .get("x-relay-transpile")
-        .and_then(|v| v.to_str().ok())
-    {
-        if parse_bool_like(header) {
-            return true;
-        }
-    }
-    false
-}
-
-fn is_transpilable_hook_path(path: &str) -> bool {
-    let normalized = path.trim_start_matches('/').to_ascii_lowercase();
-    if !normalized.starts_with("hooks/") {
-        return false;
-    }
-    normalized.ends_with(".jsx")
-        || normalized.ends_with(".tsx")
-        || normalized.ends_with(".ts")
-        || normalized.ends_with(".mts")
-        || normalized.ends_with(".mjs")
-}
-
-fn add_transpiler_version_header(resp: &mut Response) {
-    if let Ok(val) = axum::http::HeaderValue::from_str(transpiler_version()) {
-        resp.headers_mut().insert(
-            axum::http::header::HeaderName::from_static("x-relay-transpiler-version"),
-            val,
-        );
-    }
-}
-
-fn map_transpile_error(err: TranspileError) -> (StatusCode, String) {
-    match err {
-        TranspileError::ParseError {
-            filename,
-            line,
-            col,
-            message,
-        } => (
-            StatusCode::BAD_REQUEST,
-            format!(
-                "Parse error in {} at {}:{} — {}",
-                filename, line, col, message
-            ),
-        ),
-        TranspileError::TransformError(filename, source) => (
-            StatusCode::BAD_REQUEST,
-            format!("Transform error in {} — {}", filename, source),
-        ),
-        TranspileError::CodegenError(filename, source) => (
-            StatusCode::BAD_REQUEST,
-            format!("Code generation error in {} — {}", filename, source),
-        ),
-    }
-}
-
-fn build_transpile_error_response(
-    err: TranspileError,
-    branch: Option<&str>,
-    repo: Option<&str>,
-) -> Response {
-    let (status, diag) = map_transpile_error(err);
-    let mut resp = (
-        status,
-        Json(TranspileResponse {
-            code: None,
-            map: None,
-            diagnostics: Some(diag),
-            ok: false,
-        }),
-    )
-        .into_response();
-    let headers = resp.headers_mut();
-    if let Some(branch_value) = branch {
-        if let Ok(val) = axum::http::HeaderValue::from_str(branch_value) {
-            headers.insert(HEADER_BRANCH, val);
-        }
-    }
-    if let Some(repo_value) = repo {
-        if let Ok(val) = axum::http::HeaderValue::from_str(repo_value) {
-            headers.insert(HEADER_REPO, val);
-        }
-    }
-    add_transpiler_version_header(&mut resp);
-    resp
-}
-
-fn transpile_hook_file(
-    repo_path: &PathBuf,
-    branch: &str,
-    repo_name: &str,
-    normalized_path: &str,
-) -> Option<Response> {
-    let source_bytes = read_file_from_repo(repo_path, branch, normalized_path).ok()?;
-    let source = String::from_utf8(source_bytes).ok()?;
-    let filename = std::path::Path::new(normalized_path)
-        .file_name()
-        .and_then(|f| f.to_str())
-        .map(|s| s.to_string());
-    let opts = TranspileOptions {
-        filename,
-        react_dev: cfg!(debug_assertions),
-        to_commonjs: false,
-        pragma: Some("h".to_string()),
-        pragma_frag: None,
-    };
-    match transpile(&source, opts) {
-        Ok(out) => {
-            let mut resp = (
-                StatusCode::OK,
-                [
-                    ("Content-Type", "text/javascript".to_string()),
-                    (HEADER_BRANCH, branch.to_string()),
-                    (HEADER_REPO, repo_name.to_string()),
-                ],
-                out.code,
-            )
-                .into_response();
-            add_transpiler_version_header(&mut resp);
-            Some(resp)
-        }
-        Err(err) => Some(build_transpile_error_response(
-            err,
-            Some(branch),
-            Some(repo_name),
-        )),
-    }
-}
-
-fn render_directory_markdown(tree: &git2::Tree, base_path: &str) -> Vec<u8> {
-    let mut lines: Vec<String> = Vec::new();
-    let title_path = if base_path.is_empty() {
-        "/".to_string()
-    } else {
-        format!("/{}", base_path.trim_matches('/'))
-    };
-    lines.push(format!("# Directory listing: {}", title_path));
-    // Breadcrumbs
-    let mut crumb = String::new();
-    crumb.push_str("[/](/)");
-    let trimmed = base_path.trim_matches('/');
-    if !trimmed.is_empty() {
-        let mut acc = String::new();
-        for (i, seg) in trimmed.split('/').enumerate() {
-            if i == 0 {
-                acc.push_str(seg);
-            } else {
-                acc.push('/');
-                acc.push_str(seg);
-            }
-            crumb.push_str(" › ");
-            crumb.push_str(&format!("[{}]({}/)", seg, acc));
-        }
-    }
-    lines.push(crumb);
-    lines.push(String::from(""));
-    // Build sorted list: directories first then files
-    let mut dirs: Vec<String> = Vec::new();
-    let mut files: Vec<String> = Vec::new();
-    for entry in tree.iter() {
-        let name = match entry.name() {
-            Some(n) => n.to_string(),
-            None => continue,
-        };
-        match entry.kind() {
-            Some(git2::ObjectType::Tree) => {
-                let href = if base_path.is_empty() {
-                    format!("{}", name)
-                } else {
-                    format!("{}/{}", base_path.trim_matches('/'), name)
-                };
-                dirs.push(format!("- [{0}/]({0}/)", href));
-            }
-            Some(git2::ObjectType::Blob) => {
-                let href = if base_path.is_empty() {
-                    format!("{}", name)
-                } else {
-                    format!("{}/{}", base_path.trim_matches('/'), name)
-                };
-                files.push(format!("- [{0}]({0})", href));
-            }
-            _ => {}
-        }
-    }
-    dirs.sort();
-    files.sort();
-    lines.extend(dirs);
-    lines.extend(files);
-    if lines.len() <= 2 {
-        lines.push(String::from("(empty directory)"));
-    }
-    lines.join("\n").into_bytes()
-}
-
-// Convert markdown bytes to HTML bytes (fragment — no head/body wrapping)
-fn md_to_html_bytes(bytes: &[u8]) -> Vec<u8> {
-    let s = String::from_utf8_lossy(bytes);
-    let parser = MdParser::new(&s);
-    let mut out = String::new();
-    html::push_html(&mut out, parser);
-    out.into_bytes()
-}
-
-// Simple HTML wrapper for directory listings; no template lookup from repo
-fn simple_html_page(title: &str, body: &str, branch: &str, repo: &str) -> Vec<u8> {
-    let html = format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n<meta name=\"relay-branch\" content=\"{branch}\">\n<meta name=\"relay-repo\" content=\"{repo}\">\n<title>{title}</title></head><body>{body}</body></html>",
-        title = title,
-        body = body,
-        branch = branch,
-        repo = repo
-    );
-    html.into_bytes()
-}
-
-fn write_file_to_repo(
-    repo_root: &PathBuf,
-    repo_name: &str,
-    branch: &str,
-    path: &str,
-    content: &[u8],
-) -> anyhow::Result<(String, String)> {
-    let repo = match open_repo(repo_root, repo_name) {
-        Some(r) => r,
-        None => {
-            return Err(anyhow::anyhow!("Repository not found"));
-        }
-    };
-    let refname = format!("refs/heads/{}", branch);
-    let sig = Signature::now("relay", "relay@local")?;
-
-    // Current tree (or empty)
-    let (parent_commit, base_tree) = match repo.find_reference(&refname) {
-        Ok(r) => {
-            let c = r.peel_to_commit()?;
-            let t = c.tree()?;
-            (Some(c), t)
-        }
-        Err(_) => {
-            // new branch
-            let tb = repo.treebuilder(None)?;
-            let oid = tb.write()?;
-            let t = repo.find_tree(oid)?;
-            (None, t)
-        }
-    };
-
-    // Write blob
-    let blob_oid = repo.blob(content)?;
-
-    // Server no longer validates meta files; validation is delegated to repo pre-commit script
-
-    // Update tree recursively for the path
-    let mut components: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    if components.is_empty() {
-        anyhow::bail!("empty path");
-    }
-    let filename = components.pop().unwrap().to_string();
-
-    // Helper to descend and produce updated subtree oid
-    fn upsert_path(
-        repo: &Repository,
-        tree: &git2::Tree,
-        comps: &[&str],
-        filename: &str,
-        blob_oid: Oid,
-    ) -> anyhow::Result<Oid> {
-        let mut tb = repo.treebuilder(Some(tree))?;
-        if comps.is_empty() {
-            // Insert file at this level
-            tb.insert(&filename, blob_oid, 0o100644)?;
-            return Ok(tb.write()?);
-        }
-        let head = comps[0];
-        // Find or create subtree for head
-        let subtree_oid = match tree.get_name(head) {
-            Some(entry) if entry.kind() == Some(ObjectType::Tree) => entry.id(),
             _ => {
-                // create empty subtree
-                let empty = repo.treebuilder(None)?;
-                empty.write()?
+                let rp = std::env::var("RELAY_REPO_PATH")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| PathBuf::from("data"));
+                (rp, Vec::new(), None)
             }
         };
-        let subtree = repo.find_tree(subtree_oid)?;
-        let new_sub_oid = upsert_path(repo, &subtree, &comps[1..], filename, blob_oid)?;
-        tb.insert(head, new_sub_oid, 0o040000)?;
-        Ok(tb.write()?)
+    
+    // Append RELAY_STATIC_DIR if provided (comma-separated allowed)
+    if let Ok(extra) = std::env::var("RELAY_STATIC_DIR") {
+        for p in extra.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            static_paths.push(PathBuf::from(p));
+        }
     }
+    
+    info!(repo_path = %repo_path.display(), "Repository path resolved");
+    let _ = std::fs::create_dir_all(&repo_path);
 
-    let new_tree_oid = upsert_path(&repo, &base_tree, &components, &filename, blob_oid)?;
-    let new_tree = repo.find_tree(new_tree_oid)?;
+    // Initialize repos from RELAY_MASTER_REPO_LIST if provided
+    if let Ok(repo_list_str) = std::env::var("RELAY_MASTER_REPO_LIST") {
+        let repos: Vec<&str> = repo_list_str.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+        for repo_url in repos {
+            let repo_name = repo_url
+                .split('/')
+                .last()
+                .and_then(|s| s.strip_suffix(".git"))
+                .unwrap_or(repo_url);
+            let bare_repo_path = repo_path.join(format!("{}.git", repo_name));
 
-    // Create commit object without updating ref yet
-    let msg = format!("PUT {}", path);
-    let commit_oid = if let Some(parent) = &parent_commit {
-        repo.commit(None, &sig, &sig, &msg, &new_tree, &[parent])?
-    } else {
-        repo.commit(None, &sig, &sig, &msg, &new_tree, &[])?
-    };
+            if bare_repo_path.exists() {
+                info!(repo = %repo_name, "Repository already exists, skipping clone");
+                continue;
+            }
 
-    debug!(%commit_oid, %branch, path = %path, "created commit candidate");
-
-    // Run repo pre-commit script (hooks/pre-commit.mjs) if present in the new commit
-    {
-        if let Ok(new_commit_obj) = repo.find_commit(commit_oid) {
-            if let Ok(tree) = new_commit_obj.tree() {
-                use std::io::Write as _;
-                if let Ok(entry) = tree.get_path(std::path::Path::new("hooks/pre-commit.mjs")) {
-                    if let Ok(blob) = entry.to_object(&repo).and_then(|o| o.peel_to_blob()) {
-                        let tmp_path = std::env::temp_dir()
-                            .join(format!("relay-pre-commit-{}-{}.mjs", branch, commit_oid));
-                        let content = blob.content();
-
-                        // Find the node binary location first
-                        let node_bin_path = if let Ok(output) =
-                            std::process::Command::new("/usr/bin/which")
-                                .arg("node")
-                                .output()
-                        {
-                            String::from_utf8_lossy(&output.stdout).trim().to_string()
-                        } else {
-                            "node".to_string()
-                        };
-
-                        // Strip shebang since we'll invoke node explicitly
-                        let content_to_write = if content.starts_with(b"#!") {
-                            if let Some(newline_pos) = content.iter().position(|&b| b == b'\n') {
-                                &content[newline_pos + 1..]
-                            } else {
-                                content
-                            }
-                        } else {
-                            content
-                        };
-
-                        if let Ok(_) = std::fs::write(&tmp_path, content_to_write) {
-                            // Execute via node with full path
-                            let mut cmd = std::process::Command::new(&node_bin_path);
-                            cmd.arg(&tmp_path)
-                                .env("GIT_DIR", repo.path())
-                                .env(
-                                    "OLD_COMMIT",
-                                    parent_commit
-                                        .as_ref()
-                                        .map(|c| c.id().to_string())
-                                        .unwrap_or_else(|| {
-                                            String::from("0000000000000000000000000000000000000000")
-                                        }),
-                                )
-                                .env("NEW_COMMIT", commit_oid.to_string())
-                                .env("REFNAME", &refname)
-                                .env("BRANCH", branch)
-                                .stdout(std::process::Stdio::piped())
-                                .stderr(std::process::Stdio::piped());
-
-                            match cmd.output() {
-                                Ok(output) => {
-                                    let stderr = String::from_utf8_lossy(&output.stderr);
-
-                                    if !output.status.success() {
-                                        error!(%stderr, "pre-commit.mjs rejected commit");
-                                        // For now, log the error but don't fail the commit
-                                        // TODO: Once Node.js subprocess issue is fixed, make this fail: anyhow::bail!(...);
-                                    }
-                                }
-                                Err(e) => {
-                                    anyhow::bail!("failed to execute pre-commit.mjs: {}", e);
-                                }
-                            }
-                            // Clean up temp file
-                            let _ = std::fs::remove_file(&tmp_path);
-                        }
+            info!(repo = %repo_name, url = %repo_url, "Cloning repository");
+            match std::process::Command::new("git")
+                .arg("clone")
+                .arg("--bare")
+                .arg(repo_url)
+                .arg(&bare_repo_path)
+                .output()
+            {
+                Ok(output) => {
+                    if output.status.success() {
+                        info!(repo = %repo_name, "Successfully cloned repository");
+                    } else {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        warn!(repo = %repo_name, error = %stderr, "Failed to clone repository");
                     }
                 }
+                Err(e) => {
+                    warn!(repo = %repo_name, error = %e, "Failed to execute git clone");
+                }
             }
         }
     }
 
-    // Update ref to new commit
-    match repo.find_reference(&refname) {
-        Ok(mut r) => {
-            r.set_target(commit_oid, &msg)?;
-        }
-        Err(_) => {
-            repo.reference(&refname, commit_oid, true, &msg)?;
-        }
-    }
-
-    // No update hook; all DB/indexing logic is delegated to repo scripts
-
-    Ok((commit_oid.to_string(), branch.to_string()))
-}
-
-fn delete_file_in_repo(
-    repo_root: &PathBuf,
-    repo_name: &str,
-    branch: &str,
-    path: &str,
-) -> Result<(String, String), ReadError> {
-    let repo = open_repo(repo_root, repo_name).ok_or(ReadError::NotFound)?;
-    let refname = format!("refs/heads/{}", branch);
-    let sig = Signature::now("relay", "relay@local").map_err(|e| ReadError::Other(e.into()))?;
-    let (parent_commit, base_tree) = match repo.find_reference(&refname) {
-        Ok(r) => {
-            let c = r.peel_to_commit().map_err(|e| ReadError::Other(e.into()))?;
-            let t = c.tree().map_err(|e| ReadError::Other(e.into()))?;
-            (Some(c), t)
-        }
-        Err(_) => return Err(ReadError::NotFound),
+    let state = AppState {
+        repo_path,
+        static_paths,
     };
 
-    // Recursively remove path
-    fn remove_path(
-        repo: &Repository,
-        tree: &git2::Tree,
-        comps: &[&str],
-        filename: &str,
-    ) -> anyhow::Result<Option<Oid>> {
-        let mut tb = repo.treebuilder(Some(tree))?;
-        if comps.is_empty() {
-            // remove file
-            if tb.remove(filename).is_err() {
-                return Ok(None);
-            }
-            return Ok(Some(tb.write()?));
-        }
-        let head = comps[0];
-        let entry = match tree.get_name(head) {
-            Some(e) => e,
-            None => return Ok(None),
-        };
-        if entry.kind() != Some(ObjectType::Tree) {
-            return Ok(None);
-        }
-        let subtree = repo.find_tree(entry.id())?;
-        if let Some(new_sub_oid) = remove_path(repo, &subtree, &comps[1..], filename)? {
-            let mut tb2 = repo.treebuilder(Some(tree))?;
-            tb2.insert(head, new_sub_oid, 0o040000)?;
-            return Ok(Some(tb2.write()?));
-        }
-        Ok(None)
-    }
+    // Build app (OPTIONS is the discovery endpoint)
+    let acme_route_dir = std::env::var("RELAY_ACME_DIR").unwrap_or_else(|_| "/var/www/certbot".to_string());
+    let app = Router::new()
+        .route("/openapi.yaml", get(handlers::get_openapi_yaml))
+        .route("/swagger-ui", get(handlers::get_swagger_ui))
+        .route("/api/config", get(handlers::get_api_config))
+        .route("/git-pull", post(handlers::post_git_pull))
+        .route("/transpile", post(transpiler::post_transpile))
+        .route(
+            "/.well-known/acme-challenge/*path",
+            get({
+                let dir = acme_route_dir.clone();
+                move |AxPath(path): AxPath<String>| async move {
+                    handlers::serve_acme_challenge(&dir, &path).await
+                }
+            }),
+        )
+        .route("/", get(get_root).head(handlers::head_root).options(options_capabilities))
+        .route(
+            "/*path",
+            get(handlers::handle_get_file)
+                .head(handlers::head_file)
+                .put(handlers::put_file)
+                .delete(handlers::delete_file)
+                .options(options_capabilities),
+        )
+        .layer(axum::middleware::from_fn(cors_headers))
+        .layer(TraceLayer::new_for_http())
+        .with_state(state);
 
-    let mut comps: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    if comps.is_empty() {
-        return Err(ReadError::NotFound);
-    }
-    let filename = comps.pop().unwrap().to_string();
-    let new_oid_opt =
-        remove_path(&repo, &base_tree, &comps, &filename).map_err(|e| ReadError::Other(e))?;
-    let new_oid = match new_oid_opt {
-        Some(oid) => oid,
-        None => return Err(ReadError::NotFound),
-    };
-    let new_tree = repo
-        .find_tree(new_oid)
-        .map_err(|e| ReadError::Other(e.into()))?;
-    let msg = format!("DELETE {}", path);
-    let commit_oid = if let Some(ref parent) = parent_commit {
-        repo.commit(Some(&refname), &sig, &sig, &msg, &new_tree, &[parent])
-            .map_err(|e| ReadError::Other(e.into()))?
+    // Configure listeners: HTTP and optional HTTPS
+    let http_addr: SocketAddr = if let Some(bind) = bind_cli.or_else(|| std::env::var("RELAY_BIND").ok()) {
+        SocketAddr::from_str(&bind)?
     } else {
-        repo.commit(Some(&refname), &sig, &sig, &msg, &new_tree, &[])
-            .map_err(|e| ReadError::Other(e.into()))?
+        let port = std::env::var("RELAY_HTTP_PORT").ok().and_then(|s| s.parse::<u16>().ok()).unwrap_or(80);
+        SocketAddr::from_str(&format!("0.0.0.0:{}", port))?
     };
-    Ok((commit_oid.to_string(), branch.to_string()))
-}
+    let https_port = std::env::var("RELAY_HTTPS_PORT").ok().and_then(|s| s.parse::<u16>().ok()).unwrap_or(443);
+    let tls_cert = std::env::var("RELAY_TLS_CERT").ok();
+    let tls_key = std::env::var("RELAY_TLS_KEY").ok();
 
-#[derive(Debug, Deserialize)]
-struct TranspileRequest {
-    code: String,
-    filename: Option<String>,
-    #[serde(default)]
-    to_common_js: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct TranspileResponse {
-    code: Option<String>,
-    map: Option<String>,
-    diagnostics: Option<String>,
-    ok: bool,
-}
-
-pub async fn post_transpile(Json(req): Json<TranspileRequest>) -> impl IntoResponse {
-    let opts = TranspileOptions {
-        filename: req.filename.clone(),
-        react_dev: false,
-        to_commonjs: req.to_common_js,
-        pragma: Some("h".to_string()),
-        pragma_frag: None,
-    };
-    match transpile(&req.code, opts) {
-        Ok(out) => {
-            let mut resp = (
-                StatusCode::OK,
-                Json(TranspileResponse {
-                    code: Some(out.code),
-                    map: out.map,
-                    diagnostics: None,
-                    ok: true,
-                }),
-            )
-                .into_response();
-            add_transpiler_version_header(&mut resp);
-            resp
+    let app_http = app.clone();
+    let http_task = tokio::spawn(async move {
+        info!(%http_addr, "HTTP listening");
+        let listener = TcpListener::bind(&http_addr).await.expect("bind http");
+        if let Err(e) = axum::serve(listener, app_http.into_make_service()).await {
+            error!(?e, "HTTP server error");
         }
-        Err(err) => build_transpile_error_response(err, None, None),
+    });
+
+    // HTTPS optional
+    let https_task = if let (Some(cert_path), Some(key_path)) = (tls_cert, tls_key) {
+        let https_addr: SocketAddr = SocketAddr::from_str(&format!("0.0.0.0:{}", https_port))?;
+        let config = load_rustls_config(&cert_path, &key_path).await?;
+        let app_https = app;
+        Some(tokio::spawn(async move {
+            info!(%https_addr, cert=%cert_path, key=%key_path, "HTTPS listening");
+            if let Err(e) = axum_server::bind_rustls(https_addr, config)
+                .serve(app_https.into_make_service())
+                .await
+            {
+                error!(?e, "HTTPS server error");
+            }
+        }))
+    } else {
+        info!("TLS is disabled: RELAY_TLS_CERT and RELAY_TLS_KEY not both set");
+        None
+    };
+
+    if let Some(t) = https_task {
+        let _ = tokio::join!(http_task, t);
+    } else {
+        let _ = tokio::join!(http_task);
     }
+    Ok(())
 }
 
 // NOTE: Server tests are defined earlier in this file under an existing `mod tests`.

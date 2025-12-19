@@ -1,8 +1,18 @@
-Relay Server (Rust)
+# Relay Server (Rust)
 
-Implements the Relay API over a bare Git repository with optional static directory and IPFS fallback for UI assets.
+Implements the Relay API over bare Git repositories with static directory serving and detailed error reporting.
 
-Repository policy
+## Features
+
+- Serves files from multiple bare Git repositories (`.git` suffix)
+- Static file serving from configurable directories
+- Automatic hourly git pulls for repository updates
+- Detailed 404 error messages showing searched paths, repos, and branches
+- JSX/TSX transpilation via hook-transpiler WASM
+- Optional HTTPS support with automatic certificate loading
+- CORS-enabled with custom headers (X-Relay-Repo, X-Relay-Branch)
+
+## Repository Policy
 
 - Never import or reference files directly from `apps/` other than code in this crate; prefer shared assets and data in
   shared crates.
@@ -30,25 +40,32 @@ Endpoints
     - Request body (generic): `{ filter?: object, page?: number, pageSize?: number, sort?: [{ field, dir }] }`
     - Response: `{ total, page, pageSize, items }`
 
-Env
+## Environment Variables
 
-- RELAY_REPO_PATH: path to a bare repo (default ./data/repo.git)
-- RELAY_BIND: address (default 0.0.0.0:8088)
-- RELAY_DB_PATH: optional path to the local PoloDB file (default `<gitdir>/relay_index.polodb`)
-  // Tracker self-registration (optional)
-- RELAY_TRACKER_URL: tracker base URL (e.g., https://relaynet.online)
-- RELAY_SOCKET_URL: the public socket URL of this server (e.g., http://localhost:8080)
-- RELAY_REPOS: optional comma-separated list of repo subdirectories to report (if omitted, discovered from the current
-  branch)
-- RELAY_REGISTER_BRANCH: which branch to scan for repo discovery (default: main)
-  // SSL and DNS configuration (for container deployments)
-- RELAY_CERTBOT_EMAIL: email for Let's Encrypt SSL certificates
-- RELAY_DNS_DOMAIN: domain for DNS registration (default: relaynet.online)
-- RELAY_DNS_SUBDOMAIN: subdomain for this node (default: node1)
-- VERCEL_API_TOKEN: Vercel API token for DNS management
-- VERCEL_TEAM_ID: Vercel team ID (optional)
+### Server Configuration
+- `RELAY_REPO_PATH`: Root directory containing bare repos (default: `./data`)
+- `RELAY_STATIC_DIR`: Comma-separated static directories to serve (default: none)
+- `RELAY_HTTP_PORT`: HTTP port (default: 80)
+- `RELAY_HTTPS_PORT`: HTTPS port (default: 443)
+- `RELAY_BIND`: Override bind address (format: `host:port`)
 
-Rules
+### Repository Management
+- `RELAY_MASTER_REPO_LIST`: Semicolon-separated list of repos to clone on startup (e.g., `https://github.com/clevertree/relay-template`)
+- `DEFAULT_REPOS`: Alternative to RELAY_MASTER_REPO_LIST for Docker entrypoint
+
+### TLS/HTTPS Configuration
+- `RELAY_TLS_CERT`: Path to TLS certificate file
+- `RELAY_TLS_KEY`: Path to TLS private key file
+
+### ACME Challenge Support
+- `RELAY_ACME_DIR`: Directory for ACME HTTP-01 challenges (default: `/var/www/certbot`)
+
+## Headers
+
+- `X-Relay-Repo`: Select repository by name (without `.git` suffix)
+- `X-Relay-Branch`: Select branch (default: `main`)
+
+## Env
 
 - Repository rules and validation are defined in `.relay/pre-commit.mjs` and `.relay/pre-receive.mjs` scripts within
   each repository.
@@ -70,7 +87,54 @@ Testing policy
 - Tests may clone from the canonical template repository: `https://github.com/clevertree/relay-template/`.
 - The template repository includes example `.relay/pre-commit.mjs` and `.relay/pre-receive.mjs` scripts for validation.
 
-CLI & Run
+## CLI & Run
+
+### 1. Build
+```bash
+cargo build --release
+```
+
+### 2. Run Server
+```bash
+cargo run --release -- serve [OPTIONS]
+```
+
+**Options:**
+- `--repo <PATH>`: Bare Git repository root directory (default: from `RELAY_REPO_PATH` env or `./data`)
+- `--static <DIR>`: Additional static directory to serve files from (repeatable)
+- `--bind <HOST:PORT>`: Bind address (default: from `RELAY_BIND` env or `0.0.0.0:80`)
+
+**Example:**
+```bash
+RELAY_REPO_PATH=/srv/relay/data \
+RELAY_STATIC_DIR=/srv/relay/www \
+RELAY_HTTP_PORT=8080 \
+cargo run --release -- serve
+```
+
+### 3. Docker
+
+**Build:**
+```bash
+docker build -t relay-server .
+```
+
+**Run:**
+```bash
+docker run -d \
+  -p 8080:8080 \
+  -e DEFAULT_REPOS="https://github.com/clevertree/relay-template" \
+  -e RELAY_HTTP_PORT=8080 \
+  relay-server
+```
+
+The entrypoint script will:
+1. Clone repositories from `DEFAULT_REPOS` (bare) to `/srv/relay/data/<name>.git`
+2. Copy prebuilt static assets from `/srv/relay/prebuilt` to `/srv/relay/www`
+3. Start hourly git fetch loop in background
+4. Start relay-server on specified port
+
+## CLI & Run
 
 1) Build everything
    cargo build --workspace
@@ -118,7 +182,27 @@ Logs
 - Structured logs are written to stdout and to rolling daily files under `./logs/server.log*`.
 - HTTP request/response spans are included (method, path, status, latency).
 
-Container Deployment
+## Detailed Error Messages
+
+When a file is not found, the server returns a detailed 404 error showing:
+
+```
+Not Found
+
+Path: hooks/client/get-client.jsx
+Branch: main
+Repo: relay-template
+
+File not found in git repository. No hooks/get.mjs found to handle dynamic routing.
+```
+
+This helps developers debug:
+- Which repository was searched
+- Which branch was checked
+- Which path was requested
+- What static directories were checked (if no repo selected)
+
+## Container Deployment
 
 The server is designed to run in containers with automatic SSL termination via nginx proxy. The entrypoint script
 handles:
