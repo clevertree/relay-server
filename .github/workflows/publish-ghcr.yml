@@ -74,21 +74,26 @@ jobs:
           
           # Hack: Fix vite.config.ts for CI
           # 1. Inject missing plugins
-          # 2. Add assetsInclude for wasm to avoid module resolution errors
-          # 3. Use vite-plugin-wasm for better WASM support
+          # 2. Add assetsInclude for wasm
+          # 3. Add explicit external for 'wbg'
           
           npm install --no-fund --no-audit @rollup/plugin-yaml vite-plugin-top-level-await vite-plugin-wasm
           
-          # Inject imports at the top
-          sed -i "1i import yaml from '@rollup/plugin-yaml'" vite.config.ts
-          sed -i "1i import topLevelAwait from 'vite-plugin-top-level-await'" vite.config.ts
-          sed -i "1i import wasm from 'vite-plugin-wasm'" vite.config.ts
+          # Inject imports at the top if they don't exist
+          grep -q "import yaml" vite.config.ts || sed -i "1i import yaml from '@rollup/plugin-yaml'" vite.config.ts
+          grep -q "import topLevelAwait" vite.config.ts || sed -i "1i import topLevelAwait from 'vite-plugin-top-level-await'" vite.config.ts
+          grep -q "import wasm" vite.config.ts || sed -i "1i import wasm from 'vite-plugin-wasm'" vite.config.ts
           
-          # Inject plugins into the plugins array
-          sed -i "s/plugins: \[/plugins: \[wasm(), yaml(), topLevelAwait(), /" vite.config.ts
+          # Inject plugins into the plugins array (only if not already there)
+          grep -q "wasm()," vite.config.ts || sed -i "s/plugins: \[/plugins: \[wasm(), /" vite.config.ts
+          grep -q "yaml()," vite.config.ts || sed -i "s/plugins: \[/plugins: \[yaml(), /" vite.config.ts
+          grep -q "topLevelAwait()," vite.config.ts || sed -i "s/plugins: \[/plugins: \[topLevelAwait(), /" vite.config.ts
           
-          # Add assetsInclude and build options to externalize 'wbg'
-          sed -i "/export default defineConfig({/a \  assetsInclude: ['**/*.wasm'],\n  build: {\n    rollupOptions: {\n      external: ['wbg'],\n    },\n  }," vite.config.ts
+          # Add assetsInclude if it doesn't exist
+          grep -q "assetsInclude" vite.config.ts || sed -i "/export default defineConfig({/a \  assetsInclude: ['**/*.wasm']," vite.config.ts
+          
+          # Inject rollupOptions into ALL build blocks (to ensure it's not overridden)
+          sed -i "/build: {/a \    rollupOptions: { external: ['wbg'] }," vite.config.ts
           
           echo "Patched vite.config.ts:"
           cat vite.config.ts
