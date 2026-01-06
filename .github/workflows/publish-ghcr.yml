@@ -44,7 +44,7 @@ jobs:
             echo "Could not find web client directory in relay-clients repository"
             exit 1
           fi
-          
+
           # Root install if package.json exists
           if [ -f "relay-clients/package.json" ]; then
             cd relay-clients
@@ -56,7 +56,7 @@ jobs:
             fi
             cd ..
           fi
-          
+
           # Also check for shared package and install it if it exists
           if [ -d "relay-clients/shared" ]; then
             cd relay-clients/shared
@@ -68,6 +68,16 @@ jobs:
             cd ../../..
           fi
 
+          echo "WEB_PATH=$WEB_PATH" >> $GITHUB_ENV
+          cd $WEB_PATH
+          npm install --no-fund --no-audit
+          npm run build
+          
+          mkdir -p ../../prebuilt
+          cp -r dist/* ../../prebuilt/
+
+      - name: Extract Docker metadata
+        id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
