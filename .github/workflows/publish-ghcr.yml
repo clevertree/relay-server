@@ -34,6 +34,8 @@ jobs:
 
       - name: Build web client
         run: |
+          find relay-clients -maxdepth 3 -name "package.json"
+          
           if [ -d "relay-clients/web" ]; then
             WEB_PATH="relay-clients/web"
           elif [ -d "relay-clients/packages/web" ]; then
@@ -43,15 +45,17 @@ jobs:
             exit 1
           fi
           
-          # Check for monorepo tool
-          cd relay-clients
-          if [ -f "pnpm-lock.yaml" ]; then
-            npm install -g pnpm
-            pnpm install --no-frozen-lockfile
-          else
-            npm install --no-fund --no-audit
+          # Root install if package.json exists
+          if [ -f "relay-clients/package.json" ]; then
+            cd relay-clients
+            if [ -f "pnpm-lock.yaml" ]; then
+              npm install -g pnpm
+              pnpm install --no-frozen-lockfile
+            else
+              npm install --no-fund --no-audit
+            fi
+            cd ..
           fi
-          cd ..
           
           echo "WEB_PATH=$WEB_PATH" >> $GITHUB_ENV
           cd $WEB_PATH
