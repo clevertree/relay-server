@@ -34,8 +34,23 @@ jobs:
 
       - name: Build web client
         run: |
+          echo "Listing all package.json files:"
           find relay-clients -maxdepth 3 -name "package.json"
           
+          # Install dependencies in all packages found (monorepo support)
+          find relay-clients -maxdepth 3 -name "package.json" | while read f; do
+            dir=$(dirname "$f")
+            echo "--- Installing in $dir ---"
+            cd "$dir"
+            if [ -f "pnpm-lock.yaml" ]; then
+              npm install -g pnpm
+              pnpm install --no-frozen-lockfile
+            else
+              npm install --no-fund --no-audit
+            fi
+            cd - > /dev/null
+          done
+
           if [ -d "relay-clients/web" ]; then
             WEB_PATH="relay-clients/web"
           elif [ -d "relay-clients/packages/web" ]; then
@@ -45,36 +60,22 @@ jobs:
             exit 1
           fi
 
-          # Root install if package.json exists
-          if [ -f "relay-clients/package.json" ]; then
-            cd relay-clients
-            if [ -f "pnpm-lock.yaml" ]; then
-              npm install -g pnpm
-              pnpm install --no-frozen-lockfile
-            else
-              npm install --no-fund --no-audit
-            fi
-            cd ..
-          fi
-
-          # Also check for shared package and install it if it exists
-          if [ -d "relay-clients/shared" ]; then
-            cd relay-clients/shared
-            npm install --no-fund --no-audit
-            cd ../..
-          elif [ -d "relay-clients/packages/shared" ]; then
-            cd relay-clients/packages/shared
-            npm install --no-fund --no-audit
-            cd ../../..
-          fi
-
           echo "WEB_PATH=$WEB_PATH" >> $GITHUB_ENV
           cd $WEB_PATH
-          npm install --no-fund --no-audit
+          
+          echo "Current directory: $(pwd)"
+          echo "Build script in package.json:"
+          grep '"build":' package.json
+          
+          if [ -f "vite.config.ts" ] || [ -f "vite.config.js" ]; then
+            echo "Vite config found:"
+            cat vite.config.* || true
+          fi
+
           npm run build
           
-          mkdir -p ../../prebuilt
-          cp -r dist/* ../../prebuilt/
+          mkdir -p ../../dist-web
+          cp -r dist/* ../../dist-web/
 
       - name: Extract Docker metadata
         id: meta
