@@ -64,12 +64,13 @@ jobs:
           cd $WEB_PATH
           
           echo "Current directory: $(pwd)"
-          echo "Build script in package.json:"
-          grep '"build":' package.json
           
-          if [ -f "vite.config.ts" ] || [ -f "vite.config.js" ]; then
-            echo "Vite config found:"
-            cat vite.config.* || true
+          # Hack: Inject missing yaml plugin if missing
+          if ! grep -q "@rollup/plugin-yaml" vite.config.ts; then
+            echo "Injecting @rollup/plugin-yaml into vite.config.ts"
+            npm install --no-fund --no-audit @rollup/plugin-yaml
+            sed -i "1i import yaml from '@rollup/plugin-yaml'" vite.config.ts
+            sed -i "s/plugins: \[/plugins: \[yaml(), /" vite.config.ts
           fi
 
           npm run build
