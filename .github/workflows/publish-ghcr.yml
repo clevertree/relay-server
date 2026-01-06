@@ -65,12 +65,13 @@ jobs:
           
           echo "Current directory: $(pwd)"
           
-          # Hack: Inject missing yaml plugin if missing
+          # Hack: Inject missing plugins if missing
           if ! grep -q "@rollup/plugin-yaml" vite.config.ts; then
-            echo "Injecting @rollup/plugin-yaml into vite.config.ts"
-            npm install --no-fund --no-audit @rollup/plugin-yaml
+            echo "Injecting missing plugins into vite.config.ts"
+            npm install --no-fund --no-audit @rollup/plugin-yaml vite-plugin-top-level-await
             sed -i "1i import yaml from '@rollup/plugin-yaml'" vite.config.ts
-            sed -i "s/plugins: \[/plugins: \[yaml(), /" vite.config.ts
+            sed -i "1i import topLevelAwait from 'vite-plugin-top-level-await'" vite.config.ts
+            sed -i "s/plugins: \[/plugins: \[yaml(), topLevelAwait(), /" vite.config.ts
           fi
 
           npm run build
