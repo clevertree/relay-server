@@ -60,19 +60,30 @@ jobs:
             exit 1
           fi
 
+          echo "Listing files in $WEB_PATH/src/wasm:"
+          ls -R $WEB_PATH/src/wasm || echo "Not found"
+
           echo "WEB_PATH=$WEB_PATH" >> $GITHUB_ENV
           cd $WEB_PATH
           
           echo "Current directory: $(pwd)"
           
-          # Hack: Inject missing plugins if missing
-          if ! grep -q "@rollup/plugin-yaml" vite.config.ts; then
-            echo "Injecting missing plugins into vite.config.ts"
-            npm install --no-fund --no-audit @rollup/plugin-yaml vite-plugin-top-level-await
-            sed -i "1i import yaml from '@rollup/plugin-yaml'" vite.config.ts
-            sed -i "1i import topLevelAwait from 'vite-plugin-top-level-await'" vite.config.ts
-            sed -i "s/plugins: \[/plugins: \[yaml(), topLevelAwait(), /" vite.config.ts
-          fi
+          # Hack: Fix vite.config.ts for CI
+          # 1. Inject missing plugins
+          # 2. Add assetsInclude for wasm to prevent Vite from trying to parse them as modules if we want them as assets
+          # 3. Or fix the Rollup resolution
+          
+          npm install --no-fund --no-audit @rollup/plugin-yaml vite-plugin-top-level-await
+          
+          # Ensure imports exist
+          sed -i "1i import yaml from '@rollup/plugin-yaml'" vite.config.ts
+          sed -i "1i import topLevelAwait from 'vite-plugin-top-level-await'" vite.config.ts
+          
+          # Inject plugins into the plugins array
+          sed -i "s/plugins: \[/plugins: \[yaml(), topLevelAwait(), /" vite.config.ts
+          
+          # Add assetsInclude
+          sed -i "/export default defineConfig({/a \  assetsInclude: ['**/*.wasm']," vite.config.ts
 
           npm run build
           
