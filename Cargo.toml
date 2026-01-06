@@ -19,7 +19,9 @@ tracing-appender = "0.2"
 mime_guess = "2"
 percent-encoding = "2"
 base64 = "0.22"
+hex = "0.4"
 jsonschema = "0.17"
+http-body = "1"
 tower-http = { version = "0.5", features = ["trace", "cors"] }
 pulldown-cmark = "0.9"
 reqwest = { version = "0.12", features = ["json", "rustls-tls"] }
@@ -29,9 +31,9 @@ axum-server = { version = "0.7", features = ["tls-rustls"] }
 rustls-pemfile = "2"
 rustls = { version = "0.23", features = ["ring"] }
 hook-transpiler = "0.2.5"
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
 
 [features]
 # Enables IPFS end-to-end tests that spawn a local Kubo daemon.

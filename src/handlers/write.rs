@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::Result;
 use axum::{
@@ -121,6 +121,10 @@ pub fn write_file_to_repo(
     // Write blob
     let blob_oid = repo.blob(content)?;
 
+    // Track changed files for the hook context
+    let mut files = std::collections::HashMap::new();
+    files.insert(path.to_string(), base64::encode(content));
+
     // Server no longer validates meta files; validation is delegated to repo pre-commit script
 
     // Update tree recursively for the path
@@ -173,78 +177,25 @@ pub fn write_file_to_repo(
 
     debug!(%commit_oid, %branch, path = %path, "created commit candidate");
 
-    // Run repo pre-commit script (hooks/pre-commit.mjs) if present in the new commit
+    // Run repo pre-commit scripts via unified hook logic
     {
-        if let Ok(new_commit_obj) = repo.find_commit(commit_oid) {
-            if let Ok(tree) = new_commit_obj.tree() {
-                if let Ok(entry) = tree.get_path(Path::new("hooks/pre-commit.mjs")) {
-                    if let Ok(blob) = entry.to_object(&repo).and_then(|o| o.peel_to_blob()) {
-                        let tmp_path = std::env::temp_dir()
-                            .join(format!("relay-pre-commit-{}-{}.mjs", branch, commit_oid));
-                        let content = blob.content();
+        let ctx = git::HookContext {
+            repo_path: repo.path().to_path_buf(),
+            old_commit: parent_commit
+                .as_ref()
+                .map(|c| c.id().to_string())
+                .unwrap_or_else(|| String::from("0000000000000000000000000000000000000000")),
+            new_commit: commit_oid.to_string(),
+            refname: refname.clone(),
+            branch: branch.to_string(),
+            files: files.clone(),
+            is_verified: true,
+        };
 
-                        // Find the node binary location first
-                        let node_bin_path = if let Ok(output) =
-                            std::process::Command::new("/usr/bin/which")
-                                .arg("node")
-                                .output()
-                        {
-                            String::from_utf8_lossy(&output.stdout).trim().to_string()
-                        } else {
-                            "node".to_string()
-                        };
-
-                        // Strip shebang since we'll invoke node explicitly
-                        let content_to_write = if content.starts_with(b"#!") {
-                            if let Some(newline_pos) = content.iter().position(|&b| b == b'\n') {
-                                &content[newline_pos + 1..]
-                            } else {
-                                content
-                            }
-                        } else {
-                            content
-                        };
-
-                        if let Ok(_) = std::fs::write(&tmp_path, content_to_write) {
-                            // Execute via node with full path
-                            let mut cmd = std::process::Command::new(&node_bin_path);
-                            cmd.arg(&tmp_path)
-                                .env("GIT_DIR", repo.path())
-                                .env(
-                                    "OLD_COMMIT",
-                                    parent_commit
-                                        .as_ref()
-                                        .map(|c| c.id().to_string())
-                                        .unwrap_or_else(|| {
-                                            String::from("0000000000000000000000000000000000000000")
-                                        }),
-                                )
-                                .env("NEW_COMMIT", commit_oid.to_string())
-                                .env("REFNAME", &refname)
-                                .env("BRANCH", branch)
-                                .stdout(std::process::Stdio::piped())
-                                .stderr(std::process::Stdio::piped());
-
-                            match cmd.output() {
-                                Ok(output) => {
-                                    let stderr = String::from_utf8_lossy(&output.stderr);
-
-                                    if !output.status.success() {
-                                        error!(%stderr, "pre-commit.mjs rejected commit");
-                                        // For now, log the error but don't fail the commit
-                                        // TODO: Once Node.js subprocess issue is fixed, make this fail: anyhow::bail!(...);
-                                    }
-                                }
-                                Err(e) => {
-                                    anyhow::bail!("failed to execute pre-commit.mjs: {}", e);
-                                }
-                            }
-                            // Clean up temp file
-                            let _ = std::fs::remove_file(&tmp_path);
-                        }
-                    }
-                }
-            }
+        match git::execute_repo_hook(&ctx, "pre-commit") {
+            Ok(false) => anyhow::bail!("pre-commit hook rejected the change"),
+            Err(e) => anyhow::bail!("pre-commit hook error: {}", e),
+            Ok(true) => {} // Success
         }
     }
 
@@ -258,7 +209,23 @@ pub fn write_file_to_repo(
         }
     }
 
-    // No update hook; all DB/indexing logic is delegated to repo scripts
+    // Trigger post-receive hooks (like Auto-Push)
+    {
+        let ctx = git::HookContext {
+            repo_path: repo.path().to_path_buf(),
+            old_commit: parent_commit
+                .as_ref()
+                .map(|c| c.id().to_string())
+                .unwrap_or_else(|| String::from("0000000000000000000000000000000000000000")),
+            new_commit: commit_oid.to_string(),
+            refname: refname.clone(),
+            branch: branch.to_string(),
+            files: files.clone(),
+            is_verified: true,
+        };
+        // This is usually async in a real post-receive, but for PUT we can just execute or spawn
+        let _ = git::execute_repo_hook(&ctx, "post-receive");
+    }
 
     Ok((commit_oid.to_string(), branch.to_string()))
 }

@@ -1,6 +1,7 @@
 use axum::{http::StatusCode, response::IntoResponse, Json};
 
-use crate::{helpers, types::*};
+use crate::transpiler::helpers;
+use crate::types::*;
 use hook_transpiler::{transpile, TranspileOptions};
 
 /// POST /transpile — transpile arbitrary source (used by tooling)

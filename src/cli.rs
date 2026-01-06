@@ -17,6 +17,23 @@ pub struct Cli {
 pub enum Commands {
     /// Run the HTTP server
     Serve(ServeArgs),
+    /// Query a repository branch
+    Query(QueryArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct QueryArgs {
+    /// Repository name
+    pub repo: String,
+    /// Branch name (default: main)
+    #[arg(short, long, default_value = "main")]
+    pub branch: String,
+    /// Search query string
+    #[arg(short, long)]
+    pub query: Option<String>,
+    /// Collection name (default: index)
+    #[arg(short, long, default_value = "index")]
+    pub collection: String,
 }
 
 #[derive(Args, Debug)]

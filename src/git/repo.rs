@@ -1,5 +1,6 @@
 use git2::Repository;
 use std::path::PathBuf;
+use crate::types::ReadError;
 
 /// Returns a sorted list of bare repository names (without .git suffix) in the given root directory
 pub fn bare_repo_names(root: &PathBuf) -> Vec<String> {
@@ -26,10 +27,9 @@ pub fn open_repo(root: &PathBuf, name: &str) -> Option<Repository> {
     Repository::open_bare(p).ok()
 }
 
-/// Read .relay.yaml configuration from git tree for the given branch
-pub fn read_relay_config(repo: &Repository, branch: &str) -> Option<crate::types::RelayConfig> {
-    let branch_ref = format!("refs/heads/{}", branch);
-    let obj = repo.revparse_single(&branch_ref).ok()?;
+/// Read .relay.yaml configuration from git tree for the given revision (branch name or commit hash)
+pub fn read_relay_config(repo: &Repository, rev: &str) -> Option<crate::types::RelayConfig> {
+    let obj = repo.revparse_single(rev).ok()?;
     let commit = obj.as_commit()?;
     let tree = commit.tree().ok()?;
 
@@ -38,6 +38,11 @@ pub fn read_relay_config(repo: &Repository, branch: &str) -> Option<crate::types
     let blob = obj.as_blob()?;
     let content = std::str::from_utf8(blob.content()).ok()?;
     serde_yaml::from_str(content).ok()
+}
+
+/// Read hooks/git.yaml configuration from git tree for the given revision
+pub fn read_git_config(repo: &Repository, rev: &str) -> Option<crate::types::GitConfig> {
+    read_relay_config(repo, rev).and_then(|c| c.git)
 }
 
 /// Get commit information for a branch
@@ -66,4 +71,28 @@ pub fn list_branches(repo: &Repository) -> Vec<String> {
     }
     branches.sort();
     branches
+}
+
+/// Read a file from a git repository
+pub fn read_file_from_repo(
+    repo_path: &PathBuf,
+    branch: &str,
+    path: &str,
+) -> Result<Vec<u8>, ReadError> {
+    let repo = Repository::open_bare(repo_path).map_err(|e| ReadError::Other(e.into()))?;
+    let refname = format!("refs/heads/{}", branch);
+    let reference = repo
+        .find_reference(&refname)
+        .map_err(|_| ReadError::NotFound)?;
+    let commit = reference
+        .peel_to_commit()
+        .map_err(|_| ReadError::NotFound)?;
+    let tree = commit.tree().map_err(|e| ReadError::Other(e.into()))?;
+    let entry = tree
+        .get_path(std::path::Path::new(path))
+        .map_err(|_| ReadError::NotFound)?;
+    let blob = repo
+        .find_blob(entry.id())
+        .map_err(|e| ReadError::Other(e.into()))?;
+    Ok(blob.content().to_vec())
 }

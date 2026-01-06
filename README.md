@@ -1,4 +1,4 @@
-# Relay Server (Rust)
+# <img src="icon.png" width="32" height="32" align="center" /> Relay Server (Rust)
 
 Implements the Relay API over bare Git repositories with static directory serving and detailed error reporting.
 
@@ -30,15 +30,27 @@ Endpoints
       auto-linked when present.
 - PUT /{path} — write file and commit to selected branch/repo (branch via header or query `?branch=...`; repo via header
   or query `?repo=...`).
-    - Commits are validated by any `.relay/pre-commit.mjs` script present in the repository. Rejected commits return
-      400/500
-      with error text.
+    - Commits are validated by the `server.hooks.pre-commit` script defined in `.relay.yaml`. Rejected commits return
+      400/500 with error text.
 - DELETE /{path} — delete file and commit to selected branch/repo (branch via header or query `?branch=...`).
 - QUERY * — Custom method for YAML-driven query using the local PoloDB index built by hooks (no POST alias).
     - Pagination defaults: pageSize=25, page=0; can override via request body
     - Header X-Relay-Branch may be a branch name or `all` to query across branches
     - Request body (generic): `{ filter?: object, page?: number, pageSize?: number, sort?: [{ field, dir }] }`
     - Response: `{ total, page, pageSize, items }`
+
+## Repository Infrastructure
+
+Relay repositories use a unified configuration file `.relay.yaml` at the root to control security and automation.
+
+### Git Hooks (`relay-hook-handler`)
+The server includes a native `relay-hook-handler` binary that should be symlinked to `hooks/pre-receive` and `hooks/post-receive` in your bare repositories.
+- **Branch Protection**: Enforces GPG/SSH signature requirements natively in Rust.
+- **Custom Validation**: Dispatches to Node.js scripts (`pre-receive`) with full commit context.
+- **Auto-Push**: Synchronizes successful pushes to a list of peer servers automatically.
+
+### Webhooks
+- **GitHub**: Native endpoint at `/api/git/webhook/github` (path configurable in `.relay.yaml`) to trigger updates from external providers.
 
 ## Environment Variables
 
@@ -67,8 +79,8 @@ Endpoints
 
 ## Env
 
-- Repository rules and validation are defined in `.relay/pre-commit.mjs` and `.relay/pre-receive.mjs` scripts within
-  each repository.
+- Repository rules and validation are defined in `.relay.yaml` and implemented via Node.js scripts.
+- See [SERVER_HOOKS.md](docs/SERVER_HOOKS.md) for detailed documentation on configuration and hook execution.
 - `relay_index.json` is maintained by pre-commit/pre-receive scripts to track metadata changes and build queryable
   indexes.
 - Rules are enforced for new commits by the respective hook scripts. Repositories can customize validation by
@@ -81,11 +93,6 @@ Repository Scripts
 - `.relay/validation.mjs` — optional custom validation logic that can be invoked by pre-commit/pre-receive scripts in a
   sandboxed environment.
 - `.relay/lib/*.mjs` — shared utility modules for common validation and index management tasks.
-
-Testing policy
-
-- Tests may clone from the canonical template repository: `https://github.com/clevertree/relay-template/`.
-- The template repository includes example `.relay/pre-commit.mjs` and `.relay/pre-receive.mjs` scripts for validation.
 
 ## CLI & Run
 

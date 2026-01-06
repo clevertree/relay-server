@@ -10,7 +10,8 @@ use base64::Engine;
 use tracing::{error, info, warn};
 
 use crate::{
-    git, helpers, AppState, GitResolveResult, HEADER_BRANCH, HEADER_REPO, DEFAULT_IPFS_CACHE_ROOT,
+    git, helpers, transpiler, AppState, GitResolveResult, HEADER_BRANCH, HEADER_REPO,
+    DEFAULT_IPFS_CACHE_ROOT,
 };
 
 /// GET file handler — resolves from Git first, then hooks/get.mjs, then static
@@ -50,10 +51,15 @@ pub async fn handle_get_file(
     }
     let normalized_path = decoded.trim_start_matches('/').to_string();
 
-    if helpers::should_transpile_request(&headers, &_query) && helpers::is_transpilable_hook_path(&normalized_path) {
-        if let Some(transpiled) =
-            helpers::transpile_hook_file(&state.repo_path, &branch, &repo_name, &normalized_path)
-        {
+    if transpiler::helpers::should_transpile_request(&headers, &_query)
+        && transpiler::helpers::is_transpilable_hook_path(&normalized_path)
+    {
+        if let Some(transpiled) = transpiler::helpers::transpile_hook_file(
+            &state.repo_path,
+            &branch,
+            &repo_name,
+            &normalized_path,
+        ) {
             return transpiled;
         }
     }
