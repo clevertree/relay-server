@@ -27,6 +27,12 @@ jobs:
           repository: clevertree/relay-clients
           path: relay-clients
 
+      - name: Checkout relay-template
+        uses: actions/checkout@v4
+        with:
+          repository: clevertree/relay-template
+          path: relay-template
+
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
@@ -58,6 +64,17 @@ jobs:
           else
             echo "Could not find web client directory in relay-clients repository"
             exit 1
+          fi
+
+          # Fix template symlink/directory
+          mkdir -p $WEB_PATH/public
+          rm -rf $WEB_PATH/public/template
+          if [ -d "relay-template" ]; then
+            ln -s ../../../relay-template $WEB_PATH/public/template
+            echo "Linked relay-template to $WEB_PATH/public/template"
+          else
+            mkdir -p $WEB_PATH/public/template
+            echo "Created empty $WEB_PATH/public/template"
           fi
 
           echo "Listing files in $WEB_PATH/src/wasm:"
