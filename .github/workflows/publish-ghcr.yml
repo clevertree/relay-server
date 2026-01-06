@@ -62,8 +62,12 @@ jobs:
 
           echo "Listing files in $WEB_PATH/src/wasm:"
           ls -R $WEB_PATH/src/wasm || echo "Not found"
+          
+          echo "Checking imports of themed_styler_bg.wasm:"
+          grep -r "themed_styler_bg.wasm" $WEB_PATH/src || echo "None found"
 
-          echo "WEB_PATH=$WEB_PATH" >> $GITHUB_ENV
+          echo "Checking contents of $WEB_PATH/src/wasm/themed_styler.js (first 20 lines):"
+          head -n 20 $WEB_PATH/src/wasm/themed_styler.js || echo "Not found"
           cd $WEB_PATH
           
           echo "Current directory: $(pwd)"
