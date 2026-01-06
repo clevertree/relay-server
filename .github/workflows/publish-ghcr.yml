@@ -38,6 +38,10 @@ jobs:
             WEB_PATH="relay-clients/web"
           elif [ -d "relay-clients/packages/web" ]; then
             WEB_PATH="relay-clients/packages/web"
+            # If it's a monorepo, we might need root install for shared dependencies
+            if [ -f "relay-clients/package.json" ]; then
+              cd relay-clients && npm install --no-fund --no-audit && cd ..
+            fi
           else
             echo "Could not find web client directory in relay-clients repository"
             exit 1
