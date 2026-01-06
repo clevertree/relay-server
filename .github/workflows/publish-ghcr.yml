@@ -57,31 +57,17 @@ jobs:
             cd ..
           fi
           
-          echo "WEB_PATH=$WEB_PATH" >> $GITHUB_ENV
-          cd $WEB_PATH
-          npm install --no-fund --no-audit
-          npm run build
+          # Also check for shared package and install it if it exists
+          if [ -d "relay-clients/shared" ]; then
+            cd relay-clients/shared
+            npm install --no-fund --no-audit
+            cd ../..
+          elif [ -d "relay-clients/packages/shared" ]; then
+            cd relay-clients/packages/shared
+            npm install --no-fund --no-audit
+            cd ../../..
+          fi
 
-      - name: Copy web dist to Docker context
-        run: |
-          mkdir -p dist-web
-          cp -r ${{ env.WEB_PATH }}/dist/* dist-web/
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Extract Docker metadata
-        id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
