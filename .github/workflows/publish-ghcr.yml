@@ -49,6 +49,7 @@ jobs:
           echo "WEB_PATH=$WEB_PATH" >> $GITHUB_ENV
           cd $WEB_PATH
           npm install --no-fund --no-audit
+          npm install --no-fund --no-audit yaml
           npm run build
 
       - name: Copy web dist to Docker context
