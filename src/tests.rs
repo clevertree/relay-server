@@ -34,6 +34,10 @@ mod tests {
         let state = AppState {
             repo_path: repo_dir.path().to_path_buf(),
             static_paths: Vec::new(),
+            default_repo: None,
+            relay_server_id: None,
+            authorized_repos: None,
+            features_manifest: None,
         };
 
         let headers = HeaderMap::new();
@@ -77,6 +81,10 @@ mod tests {
         let state = AppState {
             repo_path: repo_dir.path().to_path_buf(),
             static_paths: Vec::new(),
+            default_repo: None,
+            relay_server_id: None,
+            authorized_repos: None,
+            features_manifest: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -115,6 +123,10 @@ mod tests {
         let state = AppState {
             repo_path: repo_dir.path().to_path_buf(),
             static_paths: Vec::new(),
+            default_repo: None,
+            relay_server_id: None,
+            authorized_repos: None,
+            features_manifest: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -143,6 +155,10 @@ mod tests {
         let state = AppState {
             repo_path: repo_dir.path().to_path_buf(),
             static_paths: Vec::new(),
+            default_repo: None,
+            relay_server_id: None,
+            authorized_repos: None,
+            features_manifest: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -192,7 +208,7 @@ mod tests {
             .unwrap();
 
         let headers = HeaderMap::new();
-        let selected = helpers::strict_repo_from(&repo_dir.path().to_path_buf(), &headers);
+        let selected = helpers::strict_repo_from(&repo_dir.path().to_path_buf(), None, &headers);
 
         assert_eq!(selected, Some("repo".to_string()));
     }
@@ -204,7 +220,7 @@ mod tests {
         let _ = std::fs::create_dir_all(repo_dir.path());
 
         let headers = HeaderMap::new();
-        let selected = helpers::strict_repo_from(&repo_dir.path().to_path_buf(), &headers);
+        let selected = helpers::strict_repo_from(&repo_dir.path().to_path_buf(), None, &headers);
 
         assert_eq!(selected, None);
     }
@@ -225,6 +241,19 @@ mod tests {
         assert_eq!(names, vec!["repo1".to_string(), "repo2".to_string()]);
     }
 
+    /// RELAY_DEFAULT_REPO: when two repos exist, default name wins over lexicographic first
+    #[test]
+    fn test_strict_repo_from_default_repo_env_order() {
+        let repo_dir = tempdir().unwrap();
+        Repository::init_bare(repo_dir.path().join("alpha.git")).unwrap();
+        Repository::init_bare(repo_dir.path().join("zebra.git")).unwrap();
+        let headers = HeaderMap::new();
+        let picked = helpers::strict_repo_from(&repo_dir.path().to_path_buf(), Some("zebra"), &headers);
+        assert_eq!(picked, Some("zebra".to_string()));
+        let first_alpha = helpers::strict_repo_from(&repo_dir.path().to_path_buf(), None, &headers);
+        assert_eq!(first_alpha, Some("alpha".to_string()));
+    }
+
     /// Test HEAD / returns 204 No Content like GET
     #[tokio::test]
     async fn test_head_root() {
@@ -232,6 +261,10 @@ mod tests {
         let state = AppState {
             repo_path: repo_dir.path().to_path_buf(),
             static_paths: Vec::new(),
+            default_repo: None,
+            relay_server_id: None,
+            authorized_repos: None,
+            features_manifest: None,
         };
 
         let headers = HeaderMap::new();
@@ -265,6 +298,10 @@ mod tests {
         let state = AppState {
             repo_path: repo_dir.path().to_path_buf(),
             static_paths: Vec::new(),
+            default_repo: None,
+            relay_server_id: None,
+            authorized_repos: None,
+            features_manifest: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -304,6 +341,10 @@ mod tests {
         let state = AppState {
             repo_path: repo_dir.path().to_path_buf(),
             static_paths: Vec::new(),
+            default_repo: None,
+            relay_server_id: None,
+            authorized_repos: None,
+            features_manifest: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -331,6 +372,10 @@ mod tests {
         let state = AppState {
             repo_path: repo_dir.path().to_path_buf(),
             static_paths: Vec::new(),
+            default_repo: None,
+            relay_server_id: None,
+            authorized_repos: None,
+            features_manifest: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -398,6 +443,10 @@ server:
         let state = AppState {
             repo_path: repo_dir.path().to_path_buf(),
             static_paths: Vec::new(),
+            default_repo: None,
+            relay_server_id: None,
+            authorized_repos: None,
+            features_manifest: None,
         };
 
         let mut headers = HeaderMap::new();
@@ -476,6 +525,10 @@ process.exit(0);
         let state = AppState {
             repo_path: repo_dir.path().to_path_buf(),
             static_paths: Vec::new(),
+            default_repo: None,
+            relay_server_id: None,
+            authorized_repos: None,
+            features_manifest: None,
         };
 
         let mut headers = HeaderMap::new();

@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
+use std::sync::Arc;
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
@@ -13,10 +14,17 @@ pub const DEFAULT_IPFS_CACHE_ROOT: &str = "/tmp/ipfs-cache";
 
 #[derive(Clone)]
 pub struct AppState {
-    // Repository ROOT directory containing bare repos (name.git)
+    /// Directory containing bare repos (`name.git`). May also be a single `.git` parent.
     pub repo_path: PathBuf,
-    // Additional static directories to serve from root before Git
     pub static_paths: Vec<PathBuf>,
+    /// When set and valid, used if `X-Relay-Repo` / subdomain do not select a repo.
+    pub default_repo: Option<String>,
+    /// Unique server name; required when authorized pull list is configured.
+    pub relay_server_id: Option<String>,
+    /// When set, git-pull only for listed repos and anchor validation after fetch.
+    pub authorized_repos: Option<Arc<crate::authorized_repos::AuthorizedReposFile>>,
+    /// Written by relay-install.sh (`state/features.json`); exposed in /api/config.
+    pub features_manifest: Option<Arc<serde_json::Value>>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -52,6 +60,9 @@ pub struct GitConfig {
     #[serde(rename = "branchRules")]
     pub branch_rules: Option<BranchRulesConfig>,
     pub github: Option<GithubHooksConfig>,
+    /// Declared allowlist of Relay server IDs and key fingerprints (see docs/RELAY_TRUST_AND_BOOTSTRAP.md).
+    #[serde(rename = "relayTrust")]
+    pub relay_trust: Option<RelayTrustConfig>,
 }
 
 #[derive(Deserialize, Debug, Default, Serialize)]
@@ -72,8 +83,18 @@ pub struct BranchRule {
     pub require_signed: Option<bool>,
     #[serde(rename = "allowedKeys")]
     pub allowed_keys: Option<Vec<String>>,
+    #[serde(rename = "allowedKeyFingerprints")]
+    pub allowed_key_fingerprints: Option<Vec<String>>,
     #[serde(rename = "allowUnsigned")]
     pub allow_unsigned: Option<bool>,
+}
+
+#[derive(Deserialize, Debug, Default, Serialize)]
+pub struct RelayTrustConfig {
+    #[serde(rename = "authorizedServerIds")]
+    pub authorized_server_ids: Option<Vec<String>>,
+    #[serde(rename = "authorizedServerKeyFingerprints")]
+    pub authorized_server_key_fingerprints: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Debug, Default, Serialize)]

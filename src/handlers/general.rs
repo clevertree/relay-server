@@ -10,7 +10,7 @@ use axum::{
 use git2::Repository;
 use serde::Serialize;
 
-use crate::{git, helpers, types::*};
+use crate::{authorized_repos, git, helpers, types::*};
 
 /// Serve a minimal OpenAPI YAML specification (placeholder)
 pub async fn get_openapi_yaml() -> impl IntoResponse {
@@ -59,11 +59,21 @@ pub async fn get_swagger_ui() -> impl IntoResponse {
     (StatusCode::OK, [("Content-Type", "text/html")], html)
 }
 
-/// GET /api/config — returns configuration including peer list from RELAY_MASTER_PEER_LIST
-pub async fn get_api_config() -> impl IntoResponse {
+/// GET /api/config — peers, repo list, default repo, server id, authorized repo names
+pub async fn get_api_config(State(state): State<AppState>) -> impl IntoResponse {
     #[derive(Serialize)]
     struct Config {
         peers: Vec<String>,
+        repos: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        default_repo: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        relay_server_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        authorized_repos: Option<Vec<String>>,
+        /// Install-time feature manifest (Piper, npm extensions, ports). See relay-install.sh.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        installed_features: Option<serde_json::Value>,
     }
 
     let peer_list = std::env::var("RELAY_MASTER_PEER_LIST")
@@ -73,142 +83,267 @@ pub async fn get_api_config() -> impl IntoResponse {
         .filter(|p| !p.is_empty())
         .collect::<Vec<_>>();
 
-    let config = Config { peers: peer_list };
+    let repos = git::bare_repo_names(&state.repo_path);
+    let default_repo = state.default_repo.clone().filter(|d| repos.iter().any(|r| r == d));
+
+    let authorized_repos = state.authorized_repos.as_ref().map(|a| {
+        a.repos
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>()
+    });
+
+    let installed_features = state.features_manifest.as_ref().map(|m| {
+        serde_json::json!({
+            "manifest": m.as_ref(),
+            "summary": summarize_features(m),
+        })
+    });
+
+    let config = Config {
+        peers: peer_list,
+        repos,
+        default_repo,
+        relay_server_id: state.relay_server_id.clone(),
+        authorized_repos,
+        installed_features,
+    };
     (StatusCode::OK, Json(config))
 }
 
-/// POST /git-pull — performs git pull from origin on the bare repository
-pub async fn post_git_pull(State(state): State<AppState>) -> impl IntoResponse {
+fn summarize_features(m: &std::sync::Arc<serde_json::Value>) -> serde_json::Value {
+    let f = m.get("features").cloned().unwrap_or(serde_json::json!({}));
+    let piper = f.get("piper_tts");
+    let npm = f.get("npm_extensions");
+    serde_json::json!({
+        "http_port": m.get("http_port"),
+        "git_port": m.get("git_port"),
+        "piper_tts": {
+            "enabled": piper.and_then(|p| p.get("enabled")),
+            "http_port": piper.and_then(|p| p.get("http_port")),
+        },
+        "npm_extensions": {
+            "enabled": npm.and_then(|p| p.get("enabled")),
+            "packages": npm.and_then(|p| p.get("packages")),
+        },
+    })
+}
+
+/// POST /git-pull — fetch from `origin` into a **bare** repo.
+/// Target resolution: `?repo=` (admin) if valid, else `X-Relay-Repo` / subdomain / `RELAY_DEFAULT_REPO` / first repo.
+/// Legacy: `RELAY_REPO_PATH` may point directly at a single `*.git` directory.
+pub async fn post_git_pull(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<HashMap<String, String>>,
+) -> impl IntoResponse {
     #[derive(Serialize)]
     struct GitPullResponse {
         success: bool,
         message: String,
         updated: bool,
+        repo: Option<String>,
         before_commit: Option<String>,
         after_commit: Option<String>,
         error: Option<String>,
     }
 
-    let repo_path = &state.repo_path;
-
-    match Repository::open(repo_path) {
-        Ok(repo) => {
-            let before_commit = repo
-                .head()
-                .ok()
-                .and_then(|h| h.target())
-                .map(|oid| oid.to_string());
-
-            match repo.find_remote("origin") {
-                Ok(mut remote) => match remote.fetch(&["main"], None, None) {
-                    Ok(_) => {
-                        let fetch_head = repo.find_reference("FETCH_HEAD");
-                        let updated = if let Ok(fetch_ref) = fetch_head {
-                            match fetch_ref.target() {
-                                Some(fetch_oid) => match repo.head() {
-                                    Ok(head_ref) => {
-                                        if let Some(head_oid) = head_ref.target() {
-                                            if fetch_oid != head_oid {
-                                                match repo.set_head_detached(fetch_oid) {
-                                                    Ok(_) => match repo.checkout_head(None) {
-                                                        Ok(_) => true,
-                                                        Err(_) => false,
-                                                    },
-                                                    Err(_) => false,
-                                                }
-                                            } else {
-                                                false
-                                            }
-                                        } else {
-                                            false
-                                        }
-                                    }
-                                    Err(_) => false,
-                                },
-                                None => false,
-                            }
-                        } else {
-                            false
-                        };
-
-                        let after_commit = repo
-                            .head()
-                            .ok()
-                            .and_then(|h| h.target())
-                            .map(|oid| oid.to_string());
-
-                        let message = if updated {
-                            format!(
-                                "Repository updated from origin. Before: {}, After: {}",
-                                before_commit.clone().unwrap_or_default(),
-                                after_commit.clone().unwrap_or_default()
-                            )
-                        } else {
-                            "Repository is already up to date with origin".to_string()
-                        };
-
-                        tracing::info!("git-pull: {}", message);
-                        (
-                            StatusCode::OK,
-                            Json(GitPullResponse {
-                                success: true,
-                                message,
-                                updated,
-                                before_commit,
-                                after_commit,
-                                error: None,
-                            }),
-                        )
-                    }
-                    Err(e) => {
-                        let error_msg = format!("Failed to fetch from origin: {}", e);
-                        tracing::warn!("git-pull error: {}", error_msg);
-                        (
-                            StatusCode::OK,
-                            Json(GitPullResponse {
-                                success: false,
-                                message: error_msg.clone(),
-                                updated: false,
-                                before_commit,
-                                after_commit: None,
-                                error: Some(error_msg),
-                            }),
-                        )
-                    }
-                },
-                Err(e) => {
-                    let error_msg = format!("Failed to find remote 'origin': {}", e);
-                    tracing::warn!("git-pull error: {}", error_msg);
-                    (
-                        StatusCode::OK,
-                        Json(GitPullResponse {
-                            success: false,
-                            message: error_msg.clone(),
-                            updated: false,
-                            before_commit,
-                            after_commit: None,
-                            error: Some(error_msg),
-                        }),
-                    )
-                }
+    let names = git::bare_repo_names(&state.repo_path);
+    let from_query: Option<(PathBuf, String)> = match params.get("repo") {
+        None => None,
+        Some(q_raw) => {
+            let q = q_raw.trim().trim_end_matches(".git");
+            if q.is_empty() {
+                None
+            } else if names.iter().any(|n| n == q) {
+                Some((state.repo_path.join(format!("{}.git", q)), q.to_string()))
+            } else {
+                let msg = format!("Unknown repo {:?} (known: {:?})", q, names);
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(GitPullResponse {
+                        success: false,
+                        message: msg.clone(),
+                        updated: false,
+                        repo: None,
+                        before_commit: None,
+                        after_commit: None,
+                        error: Some(msg),
+                    }),
+                );
             }
         }
+    };
+
+    let (bare_path, repo_label) = if let Some(pair) = from_query {
+        pair
+    } else if let Some(n) =
+        helpers::strict_repo_from(&state.repo_path, state.default_repo.as_deref(), &headers)
+    {
+        (state.repo_path.join(format!("{}.git", n)), n)
+    } else if names.is_empty() && Repository::open_bare(&state.repo_path).is_ok() {
+        let stem = state
+            .repo_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("repo")
+            .to_string();
+        (state.repo_path.clone(), stem)
+    } else {
+        let msg = "No bare repository resolved. Clone repos under RELAY_REPO_PATH as name.git, set RELAY_DEFAULT_REPO, or pass ?repo=".to_string();
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(GitPullResponse {
+                success: false,
+                message: msg.clone(),
+                updated: false,
+                repo: None,
+                before_commit: None,
+                after_commit: None,
+                error: Some(msg),
+            }),
+        );
+    };
+
+    if let Some(ref cfg) = state.authorized_repos {
+        if let Err(msg) =
+            authorized_repos::ensure_pull_allowed(cfg, state.relay_server_id.as_deref(), &repo_label)
+        {
+            tracing::warn!("git-pull denied: {}", msg);
+            return (
+                StatusCode::FORBIDDEN,
+                Json(GitPullResponse {
+                    success: false,
+                    message: msg.clone(),
+                    updated: false,
+                    repo: Some(repo_label),
+                    before_commit: None,
+                    after_commit: None,
+                    error: Some(msg),
+                }),
+            );
+        }
+    }
+
+    let repo = match Repository::open_bare(&bare_path) {
+        Ok(r) => r,
         Err(e) => {
-            let error_msg = format!("Failed to open repository at {:?}: {}", repo_path, e);
-            tracing::error!("git-pull error: {}", error_msg);
-            (
+            let msg = format!("Failed to open bare repo at {:?}: {}", bare_path, e);
+            tracing::error!("git-pull: {}", msg);
+            return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(GitPullResponse {
                     success: false,
-                    message: error_msg.clone(),
+                    message: msg.clone(),
                     updated: false,
+                    repo: Some(repo_label),
                     before_commit: None,
                     after_commit: None,
-                    error: Some(error_msg),
+                    error: Some(msg),
                 }),
-            )
+            );
+        }
+    };
+
+    let before_commit = repo
+        .find_reference("refs/heads/main")
+        .ok()
+        .and_then(|r| r.target())
+        .map(|o| o.to_string());
+
+    let mut remote = match repo.find_remote("origin") {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = format!("Remote 'origin' not found: {}", e);
+            return (
+                StatusCode::OK,
+                Json(GitPullResponse {
+                    success: false,
+                    message: msg.clone(),
+                    updated: false,
+                    repo: Some(repo_label),
+                    before_commit,
+                    after_commit: None,
+                    error: Some(msg),
+                }),
+            );
+        }
+    };
+
+    let fetch_specs = ["+refs/heads/*:refs/heads/*"];
+    let fetch_res = remote.fetch(&fetch_specs, None, None);
+    if let Err(e) = fetch_res {
+        let fallback = remote.fetch(&["+refs/heads/main:refs/heads/main"], None, None);
+        if let Err(e2) = fallback {
+            let msg = format!("Fetch failed: {} (fallback main: {})", e, e2);
+            tracing::warn!("git-pull: {}", msg);
+            return (
+                StatusCode::OK,
+                Json(GitPullResponse {
+                    success: false,
+                    message: msg.clone(),
+                    updated: false,
+                    repo: Some(repo_label),
+                    before_commit: before_commit.clone(),
+                    after_commit: None,
+                    error: Some(msg),
+                }),
+            );
         }
     }
+
+    let after_commit = repo
+        .find_reference("refs/heads/main")
+        .ok()
+        .and_then(|r| r.target())
+        .map(|o| o.to_string());
+
+    if let Some(ref cfg) = state.authorized_repos {
+        if let Err(msg) = authorized_repos::validate_anchor(&repo, &repo_label, cfg) {
+            tracing::warn!("git-pull trust validation failed: {}", msg);
+            authorized_repos::rollback_main(&repo, before_commit.as_deref());
+            return (
+                StatusCode::FORBIDDEN,
+                Json(GitPullResponse {
+                    success: false,
+                    message: msg.clone(),
+                    updated: false,
+                    repo: Some(repo_label),
+                    before_commit: before_commit.clone(),
+                    after_commit: after_commit.clone(),
+                    error: Some(msg),
+                }),
+            );
+        }
+    }
+
+    let updated = before_commit != after_commit;
+    let message = if updated {
+        format!(
+            "Fetched {}. main: {:?} -> {:?}",
+            repo_label,
+            before_commit,
+            after_commit
+        )
+    } else {
+        format!("{} already up to date with origin (main)", repo_label)
+    };
+    tracing::info!("git-pull: {}", message);
+
+    (
+        StatusCode::OK,
+        Json(GitPullResponse {
+            success: true,
+            message,
+            updated,
+            repo: Some(repo_label),
+            before_commit,
+            after_commit,
+            error: None,
+        }),
+    )
 }
 
 /// Serve ACME HTTP-01 challenge files from a configured directory
@@ -235,7 +370,8 @@ pub async fn options_capabilities(
     _query: Option<Query<HashMap<String, String>>>,
 ) -> impl IntoResponse {
     let branch = helpers::branch_from(&headers);
-    let repo_name = helpers::strict_repo_from(&state.repo_path, &headers);
+    let repo_name =
+        helpers::strict_repo_from(&state.repo_path, state.default_repo.as_deref(), &headers);
 
     let repo_names = git::bare_repo_names(&state.repo_path);
     let mut repos_json: Vec<serde_json::Value> = Vec::new();
