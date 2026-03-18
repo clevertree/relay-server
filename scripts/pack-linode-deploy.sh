@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Build release binaries and pack for Linode bare-metal install.
+# Local deps: stable Rust (Cargo.lock v4+), build-essential, pkg-config, libssl-dev (or OpenSSL dev kit).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"

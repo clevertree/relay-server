@@ -23,6 +23,9 @@ jobs:
       - name: Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: cargo test (compile check)
+        run: cargo test --no-run
+
       - name: Build release + pack
         run: ./scripts/pack-linode-deploy.sh
 

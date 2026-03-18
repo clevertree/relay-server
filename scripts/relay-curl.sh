@@ -4,7 +4,8 @@
 #
 # Env:
 #   RELAY_REPO=clevertree/relay-server   RELAY_REF=main
-#   RELAY_DEPLOY_TGZ_URL=…             full deploy .tgz (binaries + optional extras) for first install / update
+#   RELAY_DEPLOY_TGZ_URL=…             full deploy .tgz for install / update (update: prefer sudo env URL when piping:
+#                                      curl … | sudo env RELAY_DEPLOY_TGZ_URL=https://…/relay-linode-deploy.tgz bash -s -- update)
 #   RELAY_BIN_SOURCE=/path             dir containing relay-server + relay-hook-handler (overrides tarball)
 set -euo pipefail
 

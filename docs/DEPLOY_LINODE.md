@@ -17,6 +17,14 @@
 
 **Latest `main` tarball:** open the latest successful **publish-linode-tarball** run on **`main`** → **Artifacts** → download **`relay-linode-deploy-<sha>.tgz`**. Or **Run workflow** manually.
 
+**CLI download** ([GitHub CLI](https://cli.github.com/): `gh auth login`):
+
+```bash
+RUN=$(gh run list -R clevertree/relay-server -w publish-linode-tarball -b main -L 1 --json databaseId -q '.[0].databaseId')
+gh run download -R clevertree/relay-server "$RUN"
+# Artifact folder is named relay-linode-deploy-<sha>/relay-linode-deploy.tgz
+```
+
 ---
 
 ## Minimum launch (required)
@@ -80,11 +88,18 @@ curl -fsSL "https://raw.githubusercontent.com/clevertree/relay-server/main/scrip
 
 Swap **`repair`** for **`update`** after you’ve published new binaries (see below).
 
-**First install** (needs a hosted **`relay-linode-deploy.tgz`** — e.g. S3, release asset, or your CDN):
+**First install** (needs a hosted **`relay-linode-deploy.tgz`** — release asset, Actions artifact on HTTPS, S3, etc.):
 
 ```bash
 export RELAY_DEPLOY_TGZ_URL="https://YOUR_HOST/relay-linode-deploy.tgz"
 curl -fsSL "https://raw.githubusercontent.com/clevertree/relay-server/main/scripts/relay-curl.sh" | sudo -E bash -s -- install
+```
+
+**Update from a new tarball** (ensures the URL reaches the script when piping):
+
+```bash
+curl -fsSL "https://raw.githubusercontent.com/clevertree/relay-server/main/scripts/relay-curl.sh" | \
+  sudo env RELAY_DEPLOY_TGZ_URL="https://YOUR_HOST/relay-linode-deploy.tgz" bash -s -- update
 ```
 
 Non-interactive: `export RELAY_INSTALL_NONINTERACTIVE=1` (and Piper/npm vars) before the same **`curl | sudo -E bash`** line.

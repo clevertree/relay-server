@@ -1,10 +1,12 @@
 use std::net::SocketAddr;
 use anyhow::Result;
 use axum::{
-    extract::Path as AxPath,
-    routing::{get, post, MethodFilter},
-    Router,
-    http::Method,
+    body::Body,
+    extract::{Path as AxPath, State},
+    http::{header, Request, StatusCode},
+    response::IntoResponse,
+    routing::{get, post},
+    Json, Router,
 };
 use clap::Parser;
 use tokio::net::TcpListener;
@@ -17,8 +19,36 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt};
 use relay_server::{
     cli::Cli,
     config::{self, Config},
-    handlers, transpiler,
+    handlers, transpiler, AppState,
 };
+
+/// Axum's `MethodFilter` does not support the custom `QUERY` verb; unhandled methods hit fallback.
+async fn relay_path_fallback(
+    State(state): State<AppState>,
+    req: Request<Body>,
+) -> axum::response::Response {
+    if req.method().as_str() != "QUERY" {
+        return (
+            StatusCode::METHOD_NOT_ALLOWED,
+            [(header::ALLOW, "GET, HEAD, PUT, DELETE, OPTIONS, QUERY")],
+            "Method Not Allowed",
+        )
+            .into_response();
+    }
+    let (parts, body) = req.into_parts();
+    let path = parts.uri.path().trim_start_matches('/').to_string();
+    let headers = parts.headers;
+    let json = match axum::body::to_bytes(body, 2 * 1024 * 1024).await {
+        Ok(b) if b.is_empty() => None,
+        Ok(b) => serde_json::from_slice::<serde_json::Value>(&b)
+            .ok()
+            .map(Json),
+        Err(_) => None,
+    };
+    handlers::handle_query(State(state), headers, AxPath(path), None, json)
+        .await
+        .into_response()
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -103,8 +133,8 @@ async fn main() -> Result<()> {
                 .head(handlers::head_file)
                 .put(handlers::put_file)
                 .delete(handlers::delete_file)
-                .on(MethodFilter::try_from(Method::from_bytes(b"QUERY").unwrap()).expect("QUERY method filter"), handlers::handle_query)
-                .options(handlers::options_capabilities),
+                .options(handlers::options_capabilities)
+                .fallback(relay_path_fallback),
         )
         .layer(cors)
         .layer(TraceLayer::new_for_http())

@@ -332,7 +332,7 @@ do_install() {
   fi
   ensure_base_deps
   ensure_user_relay
-  IFS= read -r -d '' piper_en; IFS= read -r -d '' npm_en; IFS= read -r -d '' npm_pkgs < <(prompt_features)
+  { IFS= read -r -d '' piper_en && IFS= read -r -d '' npm_en && IFS= read -r -d '' npm_pkgs; } < <(prompt_features)
   local npm_json
   npm_json="$(pkgs_to_json_array "$npm_pkgs")"
   write_features_json "$piper_en" "$npm_en" "$npm_json"
@@ -399,7 +399,7 @@ do_reconfigure_features() {
     read -r -p "[y/N] " c
     [[ "${c,,}" == "y" ]] || exit 0
   fi
-  IFS= read -r -d '' piper_en; IFS= read -r -d '' npm_en; IFS= read -r -d '' npm_pkgs < <(prompt_features)
+  { IFS= read -r -d '' piper_en && IFS= read -r -d '' npm_en && IFS= read -r -d '' npm_pkgs; } < <(prompt_features)
   local npm_json
   npm_json="$(pkgs_to_json_array "$npm_pkgs")"
   systemctl stop relay-tts-piper 2>/dev/null || true
