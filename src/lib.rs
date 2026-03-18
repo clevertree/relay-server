@@ -1,5 +1,6 @@
 pub mod git;
 pub mod cli;
+pub mod authorized_repos;
 pub mod types;
 pub mod handlers;
 pub mod transpiler;

@@ -4,31 +4,39 @@ use axum::http::HeaderMap;
 use git2::Repository;
 use percent_encoding::percent_decode_str;
 
-/// Extract repo name from X-Relay-Repo header or repo.{hostname} subdomain
-pub fn strict_repo_from(root: &PathBuf, headers: &HeaderMap) -> Option<String> {
-    // Header first
+/// Repo resolution: valid `X-Relay-Repo` → subdomain label → `RELAY_DEFAULT_REPO` → first bare name (sorted).
+pub fn strict_repo_from(
+    root: &PathBuf,
+    default_repo_name: Option<&str>,
+    headers: &HeaderMap,
+) -> Option<String> {
+    let names = crate::git::bare_repo_names(root);
+    if names.is_empty() {
+        return None;
+    }
     if let Some(h) = headers.get(crate::types::HEADER_REPO).and_then(|v| v.to_str().ok()) {
-        let name = h.trim().trim_matches('/');
-        if !name.is_empty() {
-            let name = name.to_string();
-            if crate::git::bare_repo_names(root).iter().any(|n| n == &name) {
-                return Some(name);
-            }
+        let name = h.trim().trim_matches('/').trim_end_matches(".git");
+        if !name.is_empty() && names.iter().any(|n| n == name) {
+            return Some(name.to_string());
         }
     }
-    // Sub-subdomain: first label in host if there are 3+ labels
     if let Some(host) = headers.get("host").and_then(|v| v.to_str().ok()) {
-        let host = host.split(':').next().unwrap_or(host); // strip port
+        let host = host.split(':').next().unwrap_or(host);
         let parts: Vec<&str> = host.split('.').collect();
         if parts.len() >= 3 {
-            let candidate = parts[0].to_string();
-            if crate::git::bare_repo_names(root).iter().any(|n| n == &candidate) {
-                return Some(candidate);
+            let candidate = parts[0];
+            if names.iter().any(|n| n == candidate) {
+                return Some(candidate.to_string());
             }
         }
     }
-    // Default: first available
-    crate::git::bare_repo_names(root).into_iter().next()
+    if let Some(d) = default_repo_name {
+        let d = d.trim().trim_end_matches(".git");
+        if !d.is_empty() && names.iter().any(|n| n == d) {
+            return Some(d.to_string());
+        }
+    }
+    names.into_iter().next()
 }
 
 /// Resolve the branch name from X-Relay-Branch header, defaults to main
