@@ -1,4 +1,23 @@
-# Deploy relay-server to Linode
+# Deploy relay-server to Linode (bare metal — no Docker)
+
+## Recommended plan
+
+| Step | What |
+|------|------|
+| **1. VM** | Linode **Ubuntu 22.04/24.04 LTS**, open **22, 8080, 9418** (and **5590** if Piper). |
+| **2. Binaries** | Use a **versioned tarball**, not ad-hoc laptop builds in prod. **Tag** `v1.2.3` → GitHub Actions **[`publish-linode-tarball`](../.github/workflows/publish-linode-tarball.yml)** attaches **`relay-linode-deploy.tgz`** to that **Release**. Or run **`./scripts/pack-linode-deploy.sh`** locally and host the file (S3, etc.). |
+| **3. Install** | **`relay-curl.sh`** one-liner with **`RELAY_DEPLOY_TGZ_URL`** pointing at the release asset URL, **or** `scp` the tgz and **`sudo ./install.sh install`**. |
+| **4. Trust** | **`authorized-repos.yaml`** + **`relay.env`** (`RELAY_SERVER_ID`, `RELAY_AUTHORIZED_REPOS_PATH`). |
+| **5. Data** | **`relay-bootstrap.sh`** (catalog or manifest) **or** bare init + **`git push`** from laptop. |
+| **6. Updates** | **Binary upgrade:** new tgz → **`install.sh update`** or **`relay-curl.sh`** with new **`RELAY_DEPLOY_TGZ_URL`**. **Script/hardening only:** **`relay-curl.sh … repair`** (pulls **`relay-install.sh`** from GitHub). |
+
+**Release tarball URL shape (after you push tag `v0.3.1`):**
+
+`https://github.com/clevertree/relay-server/releases/download/v0.3.1/relay-linode-deploy.tgz`
+
+**Manual CI build (no tag):** Actions → **publish-linode-tarball** → **Run workflow** → download **relay-linode-deploy** artifact.
+
+---
 
 ## Minimum launch (required)
 
