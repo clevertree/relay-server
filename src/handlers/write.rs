@@ -25,7 +25,7 @@ pub async fn put_file(
 ) -> impl IntoResponse {
     let decoded = helpers::url_decode(&path).decode_utf8_lossy().to_string();
     let branch = helpers::branch_from(&headers);
-    let repo_name = match helpers::strict_repo_from(&state.repo_path, &headers) {
+    let repo_name = match helpers::strict_repo_from(&state.repo_path, state.default_repo.as_deref(), &headers) {
         Some(r) => r,
         None => {
             return (
@@ -61,7 +61,7 @@ pub async fn delete_file(
 ) -> impl IntoResponse {
     let decoded = helpers::url_decode(&path).decode_utf8_lossy().to_string();
     let branch = helpers::branch_from(&headers);
-    let repo_name = match helpers::strict_repo_from(&state.repo_path, &headers) {
+    let repo_name = match helpers::strict_repo_from(&state.repo_path, state.default_repo.as_deref(), &headers) {
         Some(r) => r,
         None => return StatusCode::NOT_FOUND.into_response(),
     };

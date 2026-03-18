@@ -26,7 +26,8 @@ pub async fn handle_get_file(
     info!(decoded = %decoded, "decoded path");
 
     let branch = helpers::branch_from(&headers);
-    let repo_name_opt = helpers::strict_repo_from(&state.repo_path, &headers);
+    let repo_name_opt =
+        helpers::strict_repo_from(&state.repo_path, state.default_repo.as_deref(), &headers);
     let repo_name: String;
     if repo_name_opt.is_none() {
         if let Some(resp) = try_static(&state, &decoded).await {

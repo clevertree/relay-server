@@ -78,7 +78,8 @@ pub async fn head_file(
     let decoded = helpers::url_decode(&path).decode_utf8_lossy().to_string();
 
     let branch = helpers::branch_from(&headers);
-    let repo_name_opt = helpers::strict_repo_from(&state.repo_path, &headers);
+    let repo_name_opt =
+        helpers::strict_repo_from(&state.repo_path, state.default_repo.as_deref(), &headers);
     let repo_name: String;
     if repo_name_opt.is_none() {
         // No repo selected: treat as Git 404 and check static for existence

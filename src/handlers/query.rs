@@ -16,7 +16,8 @@ pub async fn handle_query(
     body: Option<Json<serde_json::Value>>,
 ) -> impl IntoResponse {
     let branch = helpers::branch_from(&headers);
-    let repo_name_opt = helpers::strict_repo_from(&state.repo_path, &headers);
+    let repo_name_opt =
+        helpers::strict_repo_from(&state.repo_path, state.default_repo.as_deref(), &headers);
     
     let repo_name = match repo_name_opt {
         Some(name) => name,
