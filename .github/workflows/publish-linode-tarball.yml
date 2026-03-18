@@ -1,13 +1,18 @@
-# Bare-metal Linode deploy artifact (no Docker). Upload on version tags; artifact on manual run.
+# Bare-metal deploy: relay-linode-deploy.tgz (relay-server + relay-hook-handler + install scripts).
 name: publish-linode-tarball
 
 on:
   push:
+    branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
 permissions:
   contents: write
+
+concurrency:
+  group: linode-tarball-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   pack:
@@ -21,12 +26,13 @@ jobs:
       - name: Build release + pack
         run: ./scripts/pack-linode-deploy.sh
 
-      - name: Upload workflow artifact (manual runs)
+      - name: Upload artifact (main branch & manual)
         if: github.ref_type != 'tag'
         uses: actions/upload-artifact@v4
         with:
-          name: relay-linode-deploy
+          name: relay-linode-deploy-${{ github.sha }}
           path: target/relay-linode-deploy.tgz
+          retention-days: 90
 
       - name: Attach to GitHub Release (tags v*)
         if: github.ref_type == 'tag'

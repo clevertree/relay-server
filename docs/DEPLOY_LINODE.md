@@ -5,7 +5,7 @@
 | Step | What |
 |------|------|
 | **1. VM** | Linode **Ubuntu 22.04/24.04 LTS**, open **22, 8080, 9418** (and **5590** if Piper). |
-| **2. Binaries** | Use a **versioned tarball**, not ad-hoc laptop builds in prod. **Tag** `v1.2.3` → GitHub Actions **[`publish-linode-tarball`](../.github/workflows/publish-linode-tarball.yml)** attaches **`relay-linode-deploy.tgz`** to that **Release**. Or run **`./scripts/pack-linode-deploy.sh`** locally and host the file (S3, etc.). |
+| **2. Binaries** | CI **[`publish-linode-tarball`](../.github/workflows/publish-linode-tarball.yml)**: every **`main`** push uploads an artifact **`relay-linode-deploy-<sha>.tgz`** (Actions → workflow run → Artifacts). **Tag** `v1.2.3` → same workflow attaches **`relay-linode-deploy.tgz`** to the **Release** (stable URL for **`RELAY_DEPLOY_TGZ_URL`**). Or **`./scripts/pack-linode-deploy.sh`** locally. |
 | **3. Install** | **`relay-curl.sh`** one-liner with **`RELAY_DEPLOY_TGZ_URL`** pointing at the release asset URL, **or** `scp` the tgz and **`sudo ./install.sh install`**. |
 | **4. Trust** | **`authorized-repos.yaml`** + **`relay.env`** (`RELAY_SERVER_ID`, `RELAY_AUTHORIZED_REPOS_PATH`). |
 | **5. Data** | **`relay-bootstrap.sh`** (catalog or manifest) **or** bare init + **`git push`** from laptop. |
@@ -15,7 +15,7 @@
 
 `https://github.com/clevertree/relay-server/releases/download/v0.3.1/relay-linode-deploy.tgz`
 
-**Manual CI build (no tag):** Actions → **publish-linode-tarball** → **Run workflow** → download **relay-linode-deploy** artifact.
+**Latest `main` tarball:** open the latest successful **publish-linode-tarball** run on **`main`** → **Artifacts** → download **`relay-linode-deploy-<sha>.tgz`**. Or **Run workflow** manually.
 
 ---
 
