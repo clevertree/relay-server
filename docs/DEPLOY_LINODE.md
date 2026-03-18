@@ -98,15 +98,30 @@ Record **`git rev-parse main`** → put that SHA as **`anchor_commit`** for that
 
 ---
 
-## Extra nodes (`RELAY_SERVER_ID` + pull)
+## Extra nodes (`RELAY_SERVER_ID` + repos)
+
+**Interactive (TTY):** run **`relay-bootstrap.sh`** with no manifest — you get a checkbox-style list (**`[x]`** = clone). Defaults: **relay-template**, **relay-server**, **songwalker-library** (GitHub `clevertree/*`). Toggle with **`1` `2` `3`**, **`a`** = all, **`n`** = none, **Enter** = proceed.
 
 ```bash
 export RELAY_SERVER_ID=relay-atlanta2
-export RELAY_BOOTSTRAP_MANIFEST_URL=https://…/bootstrap.json   # includes relay_server_id + bareRepos[].anchorCommit
+sudo -u relay bash /opt/relay/.../relay-bootstrap.sh   # or from deploy tarball directory
+```
+
+**Non-interactive / cloud-init:** clones **all** catalog repos unless excluded:
+
+```bash
+RELAY_BOOTSTRAP_NONINTERACTIVE=1 RELAY_CATALOG_EXCLUDE=relay-server ./relay-bootstrap.sh
+```
+
+**Manifest URL** (anchors + optional npm) still supported:
+
+```bash
+export RELAY_SERVER_ID=relay-atlanta2
+export RELAY_BOOTSTRAP_MANIFEST_URL=https://…/bootstrap.json
 ./relay-bootstrap.sh
 ```
 
-Manifest **`relay_server_id`** must match. Copy **`authorized-repos.yaml`** to the new node (same anchors) before starting **`relay-server`**.
+Manifest **`relay_server_id`** must match. Copy **`authorized-repos.yaml`** to the new node (same anchors) before starting **`relay-server`**. To add more default catalog repos, edit **`BOOTSTRAP_CATALOG_NAMES`** / **`BOOTSTRAP_CATALOG_URLS`** in **`scripts/relay-bootstrap.sh`**.
 
 ---
 
