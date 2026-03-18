@@ -27,7 +27,8 @@ detect_pm() {
   elif command -v yum >/dev/null 2>&1; then echo yum
   elif command -v apk >/dev/null 2>&1; then echo apk
   elif command -v pacman >/dev/null 2>&1; then echo pacman
-  else die "no supported package manager (apt, dnf, yum, apk, pacman)"
+  elif command -v zypper >/dev/null 2>&1; then echo zypper
+  else die "no supported package manager (apt, dnf, yum, apk, pacman, zypper)"
   fi
 }
 
@@ -39,15 +40,24 @@ install_packages() {
     yum) yum install -y "$@" ;;
     apk) apk add --no-cache "$@" ;;
     pacman) pacman -Sy --noconfirm "$@" ;;
+    zypper) zypper install -y "$@" ;;
   esac
 }
 
 map_pkg_node() {
   case "$(detect_pm)" in
     apt) echo "nodejs" ;;
-    dnf|yum) echo "nodejs npm" ;;
+    dnf|yum|zypper) echo "nodejs npm" ;;
     apk) echo "nodejs npm" ;;
     pacman) echo "nodejs npm" ;;
+  esac
+}
+
+# Debian/Ubuntu use package xz-utils; others typically use xz.
+map_pkg_xz() {
+  case "$(detect_pm)" in
+    apt) echo xz-utils ;;
+    *) echo xz ;;
   esac
 }
 
@@ -56,11 +66,12 @@ ensure_user_relay() {
 }
 
 ensure_base_deps() {
-  local pm
+  local pm xz_pkg
   pm="$(detect_pm)"
+  xz_pkg="$(map_pkg_xz)"
   local node_pkgs
   node_pkgs="$(map_pkg_node)"
-  install_packages "$pm" git curl ca-certificates tar gzip xz python3 ${node_pkgs}
+  install_packages "$pm" git curl ca-certificates tar gzip "$xz_pkg" python3 ${node_pkgs}
   command -v jq >/dev/null || install_packages "$pm" jq 2>/dev/null || {
     log "jq missing; installing via pip fallback"
     python3 -m pip install --break-system-packages jq 2>/dev/null || true
@@ -192,12 +203,22 @@ install_npm_extensions() {
   sudo -u relay bash -c "cd '$INSTALL/node_extensions' && (test -f package.json || npm init -y >/dev/null) && npm install --no-save $pkgs"
 }
 
+# Copy binary into INSTALL/bin unless it is already that file (repair often uses RELAY_BIN_SOURCE=$INSTALL/bin).
 install_binaries() {
   local src="${RELAY_BIN_SOURCE:-$SCRIPT_DIR}"
   [[ -f "$src/relay-server" ]] || src="."
   [[ -f "$src/relay-server" ]] || die "relay-server binary not found (place in $SCRIPT_DIR or cwd)"
+  [[ -f "$src/relay-hook-handler" ]] || die "relay-hook-handler binary not found beside relay-server in $src"
   mkdir -p "$INSTALL/bin" "$INSTALL/hooks" "$INSTALL/data" "$INSTALL/logs" "$INSTALL/www"
-  cp -f "$src/relay-server" "$src/relay-hook-handler" "$INSTALL/bin/"
+  _copy_bin_if_needed() {
+    local s="$1" d="$2"
+    if [[ -f "$d" ]] && [[ "$(stat -c '%d:%i' "$s")" == "$(stat -c '%d:%i' "$d")" ]]; then
+      return 0
+    fi
+    cp -f "$s" "$d"
+  }
+  _copy_bin_if_needed "$src/relay-server" "$INSTALL/bin/relay-server"
+  _copy_bin_if_needed "$src/relay-hook-handler" "$INSTALL/bin/relay-hook-handler"
   chmod +x "$INSTALL/bin/relay-server" "$INSTALL/bin/relay-hook-handler"
   chown -R relay:relay "$INSTALL"
   for h in pre-receive post-receive post-update; do
@@ -295,6 +316,14 @@ pkgs_to_json_array() {
   printf ']'
 }
 
+# If binaries exist but state was never written (manual copy / old install), create minimal features.json.
+bootstrap_features_json_if_missing() {
+  [[ -f "$FEATURES_JSON" ]] && return 0
+  [[ -f "$INSTALL/bin/relay-server" ]] || return 0
+  log "No $FEATURES_JSON — bootstrapping minimal state (Piper/npm off). Use reconfigure-features to enable."
+  write_features_json 0 0 "[]"
+}
+
 do_install() {
   need_root
   if [[ -f "$FEATURES_JSON" ]] && [[ "${RELAY_INSTALL_FRESH:-}" != "1" ]]; then
@@ -325,7 +354,8 @@ do_install() {
 
 do_update() {
   need_root
-  [[ -f "$FEATURES_JSON" ]] || die "run install first"
+  bootstrap_features_json_if_missing
+  [[ -f "$FEATURES_JSON" ]] || die "run install first (or ensure $INSTALL/bin/relay-server exists)"
   install_binaries
   systemctl restart relay-git-daemon relay-server
   systemctl try-restart relay-tts-piper 2>/dev/null || true
@@ -334,7 +364,8 @@ do_update() {
 
 do_repair() {
   need_root
-  [[ -f "$FEATURES_JSON" ]] || die "run install first"
+  bootstrap_features_json_if_missing
+  [[ -f "$FEATURES_JSON" ]] || die "run install first, or deploy binaries to $INSTALL/bin first"
   ensure_base_deps
   ensure_user_relay
   local piper_en npm_en
@@ -361,7 +392,8 @@ do_repair() {
 
 do_reconfigure_features() {
   need_root
-  [[ -f "$FEATURES_JSON" ]] || die "run install first"
+  bootstrap_features_json_if_missing
+  [[ -f "$FEATURES_JSON" ]] || die "run install first, or deploy binaries to $INSTALL/bin first"
   log "Reconfigure will replace feature installs. Continue? (features are only changed via this script)"
   if [[ "${RELAY_INSTALL_NONINTERACTIVE:-}" != "1" ]] && [[ -t 0 ]]; then
     read -r -p "[y/N] " c
@@ -411,7 +443,7 @@ case "${1:-install}" in
     echo "Usage: $0 {install|update|repair|reconfigure-features}"
     echo "  install   — first-time; prompts for Piper + npm features (or set RELAY_INSTALL_NONINTERACTIVE=1)"
     echo "  update    — refresh relay-server binaries from this directory"
-    echo "  repair    — fix perms, reinstall features from state/features.json"
+    echo "  repair    — fix perms, reinstall features from state/features.json (bootstraps minimal state if missing)"
     echo "  reconfigure-features — change Piper/npm (only supported way to add/remove features)"
     exit 0
     ;;

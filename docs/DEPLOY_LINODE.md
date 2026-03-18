@@ -34,7 +34,7 @@ ssh root@IP 'cd /root && tar xzf relay-linode-deploy.tgz && sudo ./install.sh in
 |--------|---------|
 | `sudo ./install.sh install` | First-time install (interactive feature prompts: Piper TTS, npm packages). Fails if already installed unless `RELAY_INSTALL_FRESH=1`. |
 | `sudo ./install.sh update` | Refresh binaries from tarball dir; restart services. |
-| `sudo ./install.sh repair` | Re-apply systemd, hooks, npm extensions, Piper service from **`state/features.json`**. |
+| `sudo ./install.sh repair` | Re-apply systemd, hooks, npm extensions, Piper service from **`state/features.json`**. If **`features.json`** is missing but **`/opt/relay/bin/relay-server`** exists, a minimal state file is created (Piper/npm off) so repair/update work on manually seeded hosts. |
 | `sudo ./install.sh reconfigure-features` | Re-run feature prompts and rewrite **`features.json`** (only supported way to add/change optional features). |
 
 **Ports:** HTTP **8080**, git daemon **9418**, Piper HTTP **5590** (if enabled). Data **`/opt/relay/data`**.
@@ -53,7 +53,7 @@ sudo RELAY_INSTALL_NONINTERACTIVE=1 RELAY_FEAT_PIPER=1 RELAY_FEAT_NPM_PKGS="song
 
 **[`scripts/relay-curl.sh`](../scripts/relay-curl.sh)** installs `curl`, `tar`, `bash`, etc. if missing, pulls **`relay-install.sh`** + **`piper-tts-http.py`** from **`main`** (override with **`RELAY_REF`** only by editing the URL path), then runs the subcommand.
 
-**Repair or update** (server already has `/opt/relay/bin/relay-server`; refreshes scripts + systemd + feature layout from repo):
+**Repair or update** (server already has `/opt/relay/bin/relay-server`; pulls latest **`relay-install.sh`** from GitHub, reapplies systemd/hooks; binaries stay in place unless you set **`RELAY_DEPLOY_TGZ_URL`** / **`RELAY_BIN_SOURCE`** for **update**):
 
 ```bash
 curl -fsSL "https://raw.githubusercontent.com/clevertree/relay-server/main/scripts/relay-curl.sh" | sudo bash -s -- repair
