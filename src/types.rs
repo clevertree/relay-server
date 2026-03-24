@@ -7,6 +7,7 @@ use axum::{
     Json,
 };
 
+/// Legacy response header (informational only; **not** used for repo selection).
 pub const HEADER_REPO: &str = "X-Relay-Repo";
 pub const HEADER_BRANCH: &str = "X-Relay-Branch";
 pub const DEFAULT_BRANCH: &str = "main";
@@ -17,8 +18,9 @@ pub struct AppState {
     /// Directory containing bare repos (`name.git`). May also be a single `.git` parent.
     pub repo_path: PathBuf,
     pub static_paths: Vec<PathBuf>,
-    /// When set and valid, used if `X-Relay-Repo` / subdomain do not select a repo.
-    pub default_repo: Option<String>,
+    /// Node FQDN for HTTP routing: `{repo}.{node_fqdn}` (e.g. `atlanta1.relaygateway.net`).
+    /// Set via **`RELAY_PUBLIC_HOSTNAME`** or **`RELAY_NODE_FQDN`**.
+    pub node_fqdn: Option<String>,
     /// Unique server name; required when authorized pull list is configured.
     pub relay_server_id: Option<String>,
     /// When set, git-pull only for listed repos and anchor validation after fetch.

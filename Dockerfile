@@ -36,6 +36,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     xz-utils \
     nodejs \
+    jq \
+    certbot \
+    python3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy server binary

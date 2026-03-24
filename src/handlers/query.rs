@@ -17,11 +17,11 @@ pub async fn handle_query(
 ) -> impl IntoResponse {
     let branch = helpers::branch_from(&headers);
     let repo_name_opt =
-        helpers::strict_repo_from(&state.repo_path, state.default_repo.as_deref(), &headers);
+        helpers::repo_from_host(&state.repo_path, state.node_fqdn.as_deref(), &headers);
     
     let repo_name = match repo_name_opt {
         Some(name) => name,
-        None => return (StatusCode::BAD_REQUEST, "X-Relay-Repo header required").into_response(),
+        None => return (StatusCode::BAD_REQUEST, "Host must be {repo}.{RELAY_PUBLIC_HOSTNAME}").into_response(),
     };
 
     // Use path as query if it's not "query" (legacy) and not empty

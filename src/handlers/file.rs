@@ -27,15 +27,18 @@ pub async fn handle_get_file(
 
     let branch = helpers::branch_from(&headers);
     let repo_name_opt =
-        helpers::strict_repo_from(&state.repo_path, state.default_repo.as_deref(), &headers);
+        helpers::repo_from_host(&state.repo_path, state.node_fqdn.as_deref(), &headers);
     let repo_name: String;
     if repo_name_opt.is_none() {
         if let Some(resp) = try_static(&state, &decoded).await {
             return resp;
         }
+        let hint = state.node_fqdn.as_deref().map(|n| {
+            format!("Use Host: {{repo}}.{} (bare repos under RELAY_REPO_PATH as <repo>.git). ", n)
+        }).unwrap_or_else(|| "Set RELAY_PUBLIC_HOSTNAME to this node's FQDN, then use Host: {repo}.{that-fqdn}. ".to_string());
         let error_msg = format!(
-            "Not Found\n\nPath: {}\nBranch: {}\nRepo: (none - no X-Relay-Repo header)\nStatic dirs searched: {:?}\n\nNo file found in static directories.",
-            decoded, branch, state.static_paths
+            "Not Found\n\nPath: {}\nBranch: {}\nRepo: (none — {})\nStatic dirs searched: {:?}\n\nNo file found in static directories.",
+            decoded, branch, hint, state.static_paths
         );
         return (
             StatusCode::NOT_FOUND,

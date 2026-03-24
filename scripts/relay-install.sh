@@ -5,6 +5,9 @@
 # and exposed at runtime via relay-server /api/config.
 #
 # Non-interactive: RELAY_INSTALL_NONINTERACTIVE=1 RELAY_FEAT_PIPER=1 RELAY_FEAT_NPM_PKGS="songwalker-js"
+# Vercel DNS (first step of install unless skipped):
+#   RELAY_PUBLIC_FQDN=atlanta1.relaygateway.net VERCEL_API_TOKEN=... sudo -E ./install.sh install
+#   Optional: VERCEL_TEAM_ID, RELAY_VERCEL_DOMAIN (zone), RELAY_SKIP_VERCEL_DNS=1
 set -euo pipefail
 
 INSTALL="${RELAY_INSTALL_ROOT:-/opt/relay}"
@@ -324,12 +327,251 @@ bootstrap_features_json_if_missing() {
   write_features_json 0 0 "[]"
 }
 
+# --- Vercel DNS (install-time; same token env as Docker/K8s: VERCEL_API_TOKEN, optional VERCEL_TEAM_ID) ---
+RELAY_CONFIGURED_PUBLIC_FQDN=""
+
+ensure_minimal_network_tools() {
+  local pm
+  pm="$(detect_pm)"
+  command -v curl >/dev/null || install_packages "$pm" curl ca-certificates
+  if ! command -v jq >/dev/null; then
+    install_packages "$pm" jq 2>/dev/null || {
+      command -v python3 >/dev/null || install_packages "$pm" python3
+      python3 -m pip install --break-system-packages jq 2>/dev/null || true
+    }
+    command -v jq >/dev/null || die "jq required for Vercel DNS; install jq then re-run"
+  fi
+  if ! command -v dig >/dev/null && ! command -v host >/dev/null; then
+    case "$pm" in
+      apt) install_packages apt dnsutils ;;
+      dnf|yum) install_packages "$pm" bind-utils ;;
+      zypper) install_packages zypper bind-utils ;;
+      apk) install_packages apk bind-tools ;;
+      pacman) install_packages pacman bind-tools ;;
+      *) ;;
+    esac
+  fi
+}
+
+relay_get_public_ipv4() {
+  local ip url
+  for url in "https://api.ipify.org" "https://ipv4.icanhazip.com" "https://ifconfig.me/ip"; do
+    ip=$(curl -fsS -m 15 "$url" 2>/dev/null | tr -d '\r\n' || true)
+    if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      echo "$ip"
+      return 0
+    fi
+  done
+  return 1
+}
+
+vercel_dns_records_list_url() {
+  local domain="$1" name="$2" type="$3"
+  local base="https://api.vercel.com/v4/domains/${domain}/records"
+  if [[ -z "$name" ]]; then
+    if [[ -n "${VERCEL_TEAM_ID:-}" ]]; then
+      echo "${base}?teamId=${VERCEL_TEAM_ID}&type=${type}"
+    else
+      echo "${base}?type=${type}"
+    fi
+  else
+    if [[ -n "${VERCEL_TEAM_ID:-}" ]]; then
+      echo "${base}?teamId=${VERCEL_TEAM_ID}&name=${name}&type=${type}"
+    else
+      echo "${base}?name=${name}&type=${type}"
+    fi
+  fi
+}
+
+# Upsert A record; name may be empty for apex.
+vercel_dns_upsert_a() {
+  local domain="$1" name="$2" value="$3"
+  local ttl="${RELAY_DNS_TTL:-60}"
+  local token="${VERCEL_API_TOKEN:-${VERCEL_TOKEN:-}}"
+  [[ -n "$token" ]] || die "vercel_dns_upsert_a: missing VERCEL_API_TOKEN"
+  local auth_header="Authorization: Bearer ${token}"
+  local base="https://api.vercel.com"
+  local list_url team_q
+  list_url="$(vercel_dns_records_list_url "$domain" "$name" A)"
+  local list_raw rec_id
+  list_raw=$(curl -sS -H "$auth_header" "$list_url" || true)
+  echo "$list_raw" | jq -e . >/dev/null 2>&1 || die "Vercel DNS list failed for ${domain}: ${list_raw:0:400}"
+  if [[ -z "$name" ]]; then
+    rec_id=$(echo "$list_raw" | jq -r '.records[]? | select((.name==null or .name=="" or .name=="@") and .type=="A") | .id // .uid' | head -n1 || true)
+  else
+    rec_id=$(echo "$list_raw" | jq -r --arg n "$name" '.records[]? | select(.name==$n and .type=="A") | .id // .uid' | head -n1 || true)
+  fi
+
+  if [[ -n "$rec_id" && "$rec_id" != "null" ]]; then
+    local patch_url="${base}/v4/domains/${domain}/records/${rec_id}"
+    [[ -n "${VERCEL_TEAM_ID:-}" ]] && patch_url="${patch_url}?teamId=${VERCEL_TEAM_ID}"
+    local body
+    body=$(jq -n --arg v "$value" --argjson t "$ttl" '{ value: $v, ttl: $t }')
+    curl -fsS -X PATCH -H "$auth_header" -H 'Content-Type: application/json' -d "$body" "$patch_url" >/dev/null && return 0
+  else
+    local create_url="${base}/v4/domains/${domain}/records"
+    [[ -n "${VERCEL_TEAM_ID:-}" ]] && create_url="${create_url}?teamId=${VERCEL_TEAM_ID}"
+    local body
+    if [[ -z "$name" ]]; then
+      body=$(jq -n --arg v "$value" --arg t "A" --argjson ttl "$ttl" '{ name: "", value: $v, type: $t, ttl: $ttl }')
+    else
+      body=$(jq -n --arg n "$name" --arg v "$value" --arg t "A" --argjson ttl "$ttl" '{ name: $n, value: $v, type: $t, ttl: $ttl }')
+    fi
+    curl -fsS -X POST -H "$auth_header" -H 'Content-Type: application/json' -d "$body" "$create_url" >/dev/null && return 0
+  fi
+  return 1
+}
+
+vercel_list_domain_names() {
+  local token="$1"
+  local url="https://api.vercel.com/v5/domains"
+  [[ -n "${VERCEL_TEAM_ID:-}" ]] && url="${url}?teamId=${VERCEL_TEAM_ID}"
+  local raw
+  raw=$(curl -fsS -H "Authorization: Bearer ${token}" "$url")
+  echo "$raw" | jq -r '.domains[]?.name | select(.!=null)'
+}
+
+# Sets RESOLVED_VERCEL_DOMAIN and RESOLVED_VERCEL_RECORD_NAME (may be empty for apex).
+resolve_vercel_zone_for_fqdn() {
+  local fqdn="$1" token="$2"
+  RESOLVED_VERCEL_DOMAIN=""
+  RESOLVED_VERCEL_RECORD_NAME=""
+  if [[ -n "${RELAY_VERCEL_DOMAIN:-}" ]]; then
+    local d="${RELAY_VERCEL_DOMAIN}"
+    if [[ "$fqdn" == "$d" ]]; then
+      RESOLVED_VERCEL_DOMAIN="$d"
+      RESOLVED_VERCEL_RECORD_NAME=""
+      return 0
+    fi
+    local suffix=".$d"
+    if [[ "$fqdn" == *"$suffix" ]]; then
+      RESOLVED_VERCEL_DOMAIN="$d"
+      RESOLVED_VERCEL_RECORD_NAME="${fqdn%"$suffix"}"
+      return 0
+    fi
+    die "RELAY_VERCEL_DOMAIN=$d does not match FQDN=$fqdn"
+  fi
+
+  local raw best="" best_len=0 d len
+  raw=$(curl -fsS -H "Authorization: Bearer ${token}" "https://api.vercel.com/v5/domains$([[ -n "${VERCEL_TEAM_ID:-}" ]] && echo "?teamId=${VERCEL_TEAM_ID}")")
+  echo "$raw" | jq -e . >/dev/null 2>&1 || die "Vercel domains list failed: ${raw:0:500}"
+
+  while IFS= read -r d; do
+    [[ -z "$d" ]] && continue
+    if [[ "$fqdn" == "$d" ]]; then
+      RESOLVED_VERCEL_DOMAIN="$d"
+      RESOLVED_VERCEL_RECORD_NAME=""
+      return 0
+    fi
+    if [[ "$fqdn" == *".$d" ]]; then
+      len=${#d}
+      if [[ $len -gt $best_len ]]; then
+        best_len=$len
+        best="$d"
+      fi
+    fi
+  done < <(echo "$raw" | jq -r '.domains[]?.name | select(.!=null)')
+
+  [[ -n "$best" ]] || die "No Vercel domain matches FQDN=$fqdn. Add the domain in Vercel or set RELAY_VERCEL_DOMAIN."
+  RESOLVED_VERCEL_DOMAIN="$best"
+  RESOLVED_VERCEL_RECORD_NAME="${fqdn%.$best}"
+}
+
+wait_dns_a_record() {
+  local fqdn="$1" want_ip="$2"
+  local max="${RELAY_DNS_WAIT_ATTEMPTS:-36}"
+  local sleep_s="${RELAY_DNS_WAIT_SLEEP:-5}"
+  local i=0 got
+  while [[ $i -lt "$max" ]]; do
+    got=""
+    if command -v dig >/dev/null 2>&1; then
+      got=$(dig +short A "$fqdn" @8.8.8.8 2>/dev/null | head -n1 | tr -d '\r\n' || true)
+    elif command -v host >/dev/null 2>&1; then
+      got=$(host -t A "$fqdn" 8.8.8.8 2>/dev/null | awk '/has address/ { print $4; exit }' | tr -d '\r\n' || true)
+    else
+      got=$(python3 -c "import socket; print(socket.gethostbyname('$fqdn'))" 2>/dev/null | tr -d '\r\n' || true)
+    fi
+    if [[ "$got" == "$want_ip" ]]; then
+      log "DNS OK: $fqdn -> $got"
+      return 0
+    fi
+    log "Waiting for DNS: want A $fqdn -> $want_ip (got '${got:-empty}') [$((i + 1))/$max]"
+    sleep "$sleep_s"
+    i=$((i + 1))
+  done
+  die "DNS did not resolve $fqdn to $want_ip after $max attempts (${sleep_s}s apart). Check Vercel dashboard and TTL."
+}
+
+configure_vercel_dns_first() {
+  RELAY_CONFIGURED_PUBLIC_FQDN=""
+  if [[ "${RELAY_SKIP_VERCEL_DNS:-}" == "1" ]]; then
+    log "Skipping Vercel DNS (RELAY_SKIP_VERCEL_DNS=1)"
+    return 0
+  fi
+
+  local fqdn="" token=""
+  fqdn="${RELAY_PUBLIC_FQDN:-${RELAY_DNS_FQDN:-}}"
+  token="${VERCEL_API_TOKEN:-${VERCEL_TOKEN:-}}"
+
+  if [[ "${RELAY_INSTALL_NONINTERACTIVE:-}" == "1" ]]; then
+    [[ -n "$fqdn" && -n "$token" ]] || die "Non-interactive install needs RELAY_PUBLIC_FQDN (or RELAY_DNS_FQDN) and VERCEL_API_TOKEN for DNS, or set RELAY_SKIP_VERCEL_DNS=1"
+  else
+    if [[ ! -t 0 ]]; then
+      if [[ -z "$fqdn" || -z "$token" ]]; then
+        log "Non-TTY install: set RELAY_PUBLIC_FQDN + VERCEL_API_TOKEN, or RELAY_SKIP_VERCEL_DNS=1 — skipping DNS"
+        return 0
+      fi
+    else
+      read -r -p "Update Vercel DNS to this server's public IPv4? [Y/n] " dns_yn
+      if [[ "${dns_yn,,}" == "n" ]]; then
+        log "Skipping Vercel DNS (user declined)"
+        return 0
+      fi
+      while [[ -z "$fqdn" ]]; do
+        read -r -p "Full hostname (e.g. atlanta1.relaygateway.net): " fqdn
+        fqdn="${fqdn// /}"
+      done
+      if [[ -z "$token" ]]; then
+        read -r -s -p "Vercel API token (same as VERCEL_API_TOKEN in Kubernetes/Docker): " token
+        echo "" >&2
+      fi
+      [[ -n "$token" ]] || die "Vercel API token required"
+    fi
+  fi
+
+  fqdn="${fqdn,,}"
+  [[ "$fqdn" =~ ^[a-z0-9.-]+$ ]] || die "Invalid FQDN: $fqdn"
+
+  local pub_ip
+  pub_ip="$(relay_get_public_ipv4)" || die "Could not detect public IPv4 (need outbound HTTPS)"
+  log "Public IPv4 (detected): $pub_ip"
+
+  export VERCEL_API_TOKEN="$token"
+  resolve_vercel_zone_for_fqdn "$fqdn" "$token"
+  log "Vercel zone: $RESOLVED_VERCEL_DOMAIN  record name: '${RESOLVED_VERCEL_RECORD_NAME:-@}'"
+
+  vercel_dns_upsert_a "$RESOLVED_VERCEL_DOMAIN" "$RESOLVED_VERCEL_RECORD_NAME" "$pub_ip" || die "Vercel DNS upsert failed (check token, domain on account, and team id)"
+
+  wait_dns_a_record "$fqdn" "$pub_ip"
+  RELAY_CONFIGURED_PUBLIC_FQDN="$fqdn"
+  log "Vercel DNS configured and verified for $fqdn"
+}
+
+append_relay_env_public_host() {
+  [[ -z "$RELAY_CONFIGURED_PUBLIC_FQDN" ]] && return 0
+  local f="$INSTALL/relay.env"
+  grep -q '^RELAY_PUBLIC_HOSTNAME=' "$f" 2>/dev/null && return 0
+  echo "RELAY_PUBLIC_HOSTNAME=$RELAY_CONFIGURED_PUBLIC_FQDN" >>"$f"
+}
+
 do_install() {
   need_root
   if [[ -f "$FEATURES_JSON" ]] && [[ "${RELAY_INSTALL_FRESH:-}" != "1" ]]; then
     log "Already installed ($FEATURES_JSON). Commands: update | repair | reconfigure-features"
     exit 0
   fi
+  ensure_minimal_network_tools
+  configure_vercel_dns_first
   ensure_base_deps
   ensure_user_relay
   { IFS= read -r -d '' piper_en && IFS= read -r -d '' npm_en && IFS= read -r -d '' npm_pkgs; } < <(prompt_features)
@@ -344,6 +586,7 @@ do_install() {
 
   touch "$INSTALL/relay.env"
   chown relay:relay "$INSTALL/relay.env"
+  append_relay_env_public_host
   systemctl enable relay-server relay-git-daemon
   systemctl restart relay-git-daemon relay-server
   [[ "$piper_en" == "1" ]] && systemctl restart relay-tts-piper 2>/dev/null || true
@@ -441,7 +684,8 @@ case "${1:-install}" in
   reconfigure-features) shift; do_reconfigure_features "$@" ;;
   -h|--help)
     echo "Usage: $0 {install|update|repair|reconfigure-features}"
-    echo "  install   — first-time; prompts for Piper + npm features (or set RELAY_INSTALL_NONINTERACTIVE=1)"
+    echo "  install   — Vercel DNS first (unless skipped), then base deps; Piper + npm prompts (or RELAY_INSTALL_NONINTERACTIVE=1)"
+    echo "  DNS env: RELAY_PUBLIC_FQDN, VERCEL_API_TOKEN, optional VERCEL_TEAM_ID, RELAY_VERCEL_DOMAIN, RELAY_SKIP_VERCEL_DNS=1"
     echo "  update    — refresh relay-server binaries from this directory"
     echo "  repair    — fix perms, reinstall features from state/features.json (bootstraps minimal state if missing)"
     echo "  reconfigure-features — change Piper/npm (only supported way to add/remove features)"

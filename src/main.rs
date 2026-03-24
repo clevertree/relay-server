@@ -110,7 +110,7 @@ async fn main() -> Result<()> {
         .route("/swagger-ui", get(handlers::get_swagger_ui))
         .route("/api/config", get(handlers::get_api_config))
         .route("/git-pull", post(handlers::post_git_pull))
-        .route("/hooks/github", post(handlers::post_github_hook))
+        .route("/hooks/github/:repo", post(handlers::post_github_hook))
         .route("/transpile", post(transpiler::post_transpile))
         .route(
             "/.well-known/acme-challenge/*path",

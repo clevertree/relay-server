@@ -2,6 +2,19 @@
 
 Relay repositories are governed by a unified configuration file `.relay.yaml` located at the root of the repository. This file defines how the repository behaves on the server, including hook dispatching, branch protection rules, and P2P synchronization.
 
+## Trust, authorized servers, and bootstrap (normative)
+
+**Minimum server launch:** **`RELAY_SERVER_ID`** + **`RELAY_AUTHORIZED_REPOS_PATH`** (repo list + **`anchor_commit`** per repo). See **[`RELAY_TRUST_AND_BOOTSTRAP.md`](./RELAY_TRUST_AND_BOOTSTRAP.md)**.
+
+| Concern | Mechanism |
+|---------|-----------|
+| **Pull validation** | Only repos listed in **`authorized-repos.yaml`**; after fetch, **`anchor_commit`** must be ancestor of branch tip. |
+| Who may push **content** | Signed commits + **`allowedKeys`** / **`allowedKeyFingerprints`**; server hooks validate every change. |
+| Which **Relay nodes** may participate | **`git.relayTrust.authorizedServerIds`**; **`autoPush.originList`** aligned with that list. |
+| New nodes | **`RELAY_SERVER_ID`** + **`relay-bootstrap.sh`** + same **authorized-repos** policy. |
+
+Until **`allowedKeys` / fingerprint matching** is fully enforced in Rust, combine **`requireSigned: true`** with strict firewall rules on **9418**.
+
 ## Configuration Schema (`.relay.yaml`)
 
 ```yaml
@@ -52,7 +65,7 @@ git:
   # GitHub Integration
   github:
     enabled: true
-    path: "/hooks/github" # Webhook endpoint
+    path: "/hooks/github/{repo}" # Documentary; server route is POST `/hooks/github/:repo`
     events: [ "push" ]
 ```
 
@@ -95,9 +108,9 @@ validate; // Script must return the function
 
 ## GitHub Webhooks
 
-The server provides a native endpoint for GitHub push webhooks. When enabled:
-1.  GitHub sends a POST request to `/api/git/webhook/github` (or custom path).
-2.  The server verifies the signature (if configured).
+The server provides a native endpoint for GitHub push webhooks. When enabled in `.relay.yaml`:
+1.  Configure GitHub to POST to **`https://{your-server}/hooks/github/{repo}`** where **`{repo}`** is the bare directory name without `.git` (same name as the first label of your per-repo HTTP host if you use **`{repo}.{RELAY_PUBLIC_HOSTNAME}`**).
+2.  Signature verification is not wired in this path yet; treat the URL as secret or restrict by network policy.
 
 ## Testing Hooks
 

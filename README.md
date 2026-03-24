@@ -10,7 +10,7 @@ Implements the Relay API over bare Git repositories with static directory servin
 - Detailed 404 error messages showing searched paths, repos, and branches
 - JSX/TSX transpilation via hook-transpiler WASM
 - Optional HTTPS support with automatic certificate loading
-- CORS-enabled with custom headers (X-Relay-Repo, X-Relay-Branch)
+- CORS-enabled; responses may include informational `X-Relay-Repo` / `X-Relay-Branch` (not used for routing)
 
 ## Repository Policy
 
@@ -20,19 +20,18 @@ Implements the Relay API over bare Git repositories with static directory servin
 Endpoints
 
 - OPTIONS / and OPTIONS /* — discovery endpoint returning capabilities, branches, repos, current selections, and branch
-  HEAD commits (branchHeads). If `X-Relay-Branch` or `X-Relay-Repo` headers (or `?branch=`/`?repo=` query) are sent, the
-  response is filtered accordingly.
-- GET /{path} — read file at branch/repo (branch via header X-Relay-Branch or query `?branch=...`, repo via header
-  X-Relay-Repo or query `?repo=...`).
+  HEAD commits (branchHeads). The **current repo** is derived from the HTTP **`Host`** header (see below).
+- GET /{path} — read file from the bare repo named by **`Host`**: `{repo}.{RELAY_PUBLIC_HOSTNAME}` (e.g.
+  `snesology-library.atlanta1.example.net`). Branch: optional **`X-Relay-Branch`** (default **`main`**). There is **no**
+  `X-Relay-Repo`, **`?repo=`**, or **`?branch=`** routing.
     - If the path resolves to a directory, returns a markdown listing with breadcrumbs and links.
     - If the file/dir is missing, returns 404 with `text/html` body. If `/site/404.md` exists on that branch, it is
       rendered; otherwise a default page plus a parent directory listing is returned. Global and per-directory CSS are
       auto-linked when present.
-- PUT /{path} — write file and commit to selected branch/repo (branch via header or query `?branch=...`; repo via header
-  or query `?repo=...`).
+- PUT /{path} — write file and commit; same **`Host`** / branch rules as GET.
     - Commits are validated by the `server.hooks.pre-commit` script defined in `.relay.yaml`. Rejected commits return
       400/500 with error text.
-- DELETE /{path} — delete file and commit to selected branch/repo (branch via header or query `?branch=...`).
+- DELETE /{path} — delete file and commit; same **`Host`** / branch rules as GET.
 - QUERY * — Custom method for YAML-driven query using the local PoloDB index built by hooks (no POST alias).
     - Pagination defaults: pageSize=25, page=0; can override via request body
     - Header X-Relay-Branch may be a branch name or `all` to query across branches
@@ -50,12 +49,13 @@ The server includes a native `relay-hook-handler` binary that should be symlinke
 - **Auto-Push**: Synchronizes successful pushes to a list of peer servers automatically.
 
 ### Webhooks
-- **GitHub**: Native endpoint at `/api/git/webhook/github` (path configurable in `.relay.yaml`) to trigger updates from external providers.
+- **GitHub**: `POST /hooks/github/{repo}` (repo name without `.git`) — see `.relay.yaml` `server.git.github` for enable/path metadata.
 
 ## Environment Variables
 
 ### Server Configuration
 - `RELAY_REPO_PATH`: Root directory containing bare repos (default: `./data`)
+- **`RELAY_PUBLIC_HOSTNAME`** or **`RELAY_NODE_FQDN`**: Node FQDN for HTTP routing. Clients must use **`Host: {repo}.{this-value}`** so each bare repo `RELAY_REPO_PATH/{repo}.git` is unambiguous (e.g. node `atlanta1.example.net`, repo host `snesology-library.atlanta1.example.net`). For many repos, use a **wildcard DNS** record `*.{node}` → server IP.
 - `RELAY_STATIC_DIR`: Comma-separated static directories to serve (default: none)
 - `RELAY_HTTP_PORT`: HTTP port (default: 80)
 - `RELAY_HTTPS_PORT`: HTTPS port (default: 443)
@@ -74,8 +74,8 @@ The server includes a native `relay-hook-handler` binary that should be symlinke
 
 ## Headers
 
-- `X-Relay-Repo`: Select repository by name (without `.git` suffix)
-- `X-Relay-Branch`: Select branch (default: `main`)
+- **`Host`**: Selects the bare repo: `{repo-name}.{RELAY_PUBLIC_HOSTNAME}` (repo name without `.git`; must match a directory `{repo}.git` under `RELAY_REPO_PATH`).
+- `X-Relay-Branch`: Optional branch (default: `main`). **`X-Relay-Repo` is not supported** for routing.
 
 ## Env
 
@@ -218,6 +218,8 @@ handles:
 2. **SSL Certificate Provisioning**: Uses Let's Encrypt when `RELAY_CERTBOT_EMAIL` is set
 3. **DNS Registration**: Registers with Vercel DNS when `VERCEL_API_TOKEN` is provided
 4. **Nginx Proxy Configuration**: Automatically configures nginx to proxy HTTPS to the relay-server
+
+**Bare metal (Linode tarball):** **`install.sh`** runs the same Vercel DNS flow **first** (FQDN + token, or skip with **`RELAY_SKIP_VERCEL_DNS=1`**). See **[`docs/DEPLOY_LINODE.md`](docs/DEPLOY_LINODE.md)**.
 
 Example container run with SSL:
 

@@ -12,6 +12,27 @@ mod tests {
         Json,
     };
     use crate::{handlers, git, helpers, types::*};
+    use axum::http::header::HOST;
+
+    fn test_state(repo_path: std::path::PathBuf) -> AppState {
+        AppState {
+            repo_path,
+            static_paths: Vec::new(),
+            node_fqdn: Some("test.local".to_string()),
+            relay_server_id: None,
+            authorized_repos: None,
+            features_manifest: None,
+        }
+    }
+
+    fn host_header(repo: &str) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        h.insert(
+            HOST,
+            format!("{}.test.local", repo).parse().expect("host"),
+        );
+        h
+    }
 
     /// Test OPTIONS returns repository list with branches and commit heads
     #[tokio::test]
@@ -31,16 +52,9 @@ mod tests {
             .commit(Some("refs/heads/main"), &sig, &sig, "init", &tree, &[])
             .unwrap();
 
-        let state = AppState {
-            repo_path: repo_dir.path().to_path_buf(),
-            static_paths: Vec::new(),
-            default_repo: None,
-            relay_server_id: None,
-            authorized_repos: None,
-            features_manifest: None,
-        };
+        let state = test_state(repo_dir.path().to_path_buf());
 
-        let headers = HeaderMap::new();
+        let headers = host_header("repo");
         let query = None;
         let response = handlers::options_capabilities(State(state), headers, query).await;
         let (parts, body) = response.into_response().into_parts();
@@ -78,18 +92,10 @@ mod tests {
             .commit(Some("refs/heads/main"), &sig, &sig, "add file", &tree, &[])
             .unwrap();
 
-        let state = AppState {
-            repo_path: repo_dir.path().to_path_buf(),
-            static_paths: Vec::new(),
-            default_repo: None,
-            relay_server_id: None,
-            authorized_repos: None,
-            features_manifest: None,
-        };
+        let state = test_state(repo_dir.path().to_path_buf());
 
-        let mut headers = HeaderMap::new();
+        let mut headers = host_header("repo");
         headers.insert(HEADER_BRANCH, "main".parse().unwrap());
-        headers.insert(HEADER_REPO, "repo".parse().unwrap());
 
         let response = handlers::handle_get_file(State(state), headers, AxPath("hello.txt".to_string()), None).await;
         let (parts, body) = response.into_response().into_parts();
@@ -120,18 +126,10 @@ mod tests {
             .commit(Some("refs/heads/main"), &sig, &sig, "init", &tree, &[])
             .unwrap();
 
-        let state = AppState {
-            repo_path: repo_dir.path().to_path_buf(),
-            static_paths: Vec::new(),
-            default_repo: None,
-            relay_server_id: None,
-            authorized_repos: None,
-            features_manifest: None,
-        };
+        let state = test_state(repo_dir.path().to_path_buf());
 
-        let mut headers = HeaderMap::new();
+        let mut headers = host_header("repo");
         headers.insert(HEADER_BRANCH, "main".parse().unwrap());
-        headers.insert(HEADER_REPO, "repo".parse().unwrap());
 
         let response = handlers::handle_get_file(
             State(state),
@@ -152,18 +150,10 @@ mod tests {
         // Create empty data directory with no repos
         let _ = std::fs::create_dir_all(repo_dir.path());
 
-        let state = AppState {
-            repo_path: repo_dir.path().to_path_buf(),
-            static_paths: Vec::new(),
-            default_repo: None,
-            relay_server_id: None,
-            authorized_repos: None,
-            features_manifest: None,
-        };
+        let state = test_state(repo_dir.path().to_path_buf());
 
-        let mut headers = HeaderMap::new();
+        let mut headers = host_header("nonexistent");
         headers.insert(HEADER_BRANCH, "main".parse().unwrap());
-        headers.insert(HEADER_REPO, "nonexistent".parse().unwrap());
 
         let response = handlers::handle_get_file(State(state), headers, AxPath("file.txt".to_string()), None).await;
         let (parts, _body) = response.into_response().into_parts();
@@ -190,38 +180,40 @@ mod tests {
         assert_eq!(branch, DEFAULT_BRANCH);
     }
 
-    /// Test strict_repo_from selects first repo when none specified
-    #[tokio::test]
-    async fn test_strict_repo_from_default() {
+    /// Repo selection: Host `repo.test.local` + node `test.local` → `repo`
+    #[test]
+    fn test_repo_from_host_happy_path() {
         let repo_dir = tempdir().unwrap();
-
-        // Create a bare repo named "repo"
         let repo_path = repo_dir.path().join("repo.git");
-        let repo = Repository::init_bare(&repo_path).unwrap();
-
-        let sig = Signature::now("relay", "relay@local").unwrap();
-        let tb = repo.treebuilder(None).unwrap();
-        let tree_id = tb.write().unwrap();
-        let tree = repo.find_tree(tree_id).unwrap();
-        let _commit_oid = repo
-            .commit(Some("refs/heads/main"), &sig, &sig, "init", &tree, &[])
-            .unwrap();
-
-        let headers = HeaderMap::new();
-        let selected = helpers::strict_repo_from(&repo_dir.path().to_path_buf(), None, &headers);
-
+        let _ = Repository::init_bare(&repo_path).unwrap();
+        let h = host_header("repo");
+        let selected = helpers::repo_from_host(&repo_dir.path().to_path_buf(), Some("test.local"), &h);
         assert_eq!(selected, Some("repo".to_string()));
+        assert_eq!(
+            git::bare_repo_names(&repo_dir.path().to_path_buf()),
+            vec!["repo".to_string()]
+        );
     }
 
-    /// Test strict_repo_from returns None when no repos exist
+    /// No bare repos → no selection
     #[test]
-    fn test_strict_repo_from_no_repos() {
+    fn test_repo_from_host_no_repos() {
         let repo_dir = tempdir().unwrap();
         let _ = std::fs::create_dir_all(repo_dir.path());
+        let h = host_header("repo");
+        let selected = helpers::repo_from_host(&repo_dir.path().to_path_buf(), Some("test.local"), &h);
+        assert_eq!(selected, None);
+    }
 
-        let headers = HeaderMap::new();
-        let selected = helpers::strict_repo_from(&repo_dir.path().to_path_buf(), None, &headers);
-
+    /// Base node host (no repo prefix) → None
+    #[test]
+    fn test_repo_from_host_node_only() {
+        let repo_dir = tempdir().unwrap();
+        let repo_path = repo_dir.path().join("repo.git");
+        let _ = Repository::init_bare(&repo_path).unwrap();
+        let mut h = HeaderMap::new();
+        h.insert(HOST, "test.local".parse().unwrap());
+        let selected = helpers::repo_from_host(&repo_dir.path().to_path_buf(), Some("test.local"), &h);
         assert_eq!(selected, None);
     }
 
@@ -241,31 +233,11 @@ mod tests {
         assert_eq!(names, vec!["repo1".to_string(), "repo2".to_string()]);
     }
 
-    /// RELAY_DEFAULT_REPO: when two repos exist, default name wins over lexicographic first
-    #[test]
-    fn test_strict_repo_from_default_repo_env_order() {
-        let repo_dir = tempdir().unwrap();
-        Repository::init_bare(repo_dir.path().join("alpha.git")).unwrap();
-        Repository::init_bare(repo_dir.path().join("zebra.git")).unwrap();
-        let headers = HeaderMap::new();
-        let picked = helpers::strict_repo_from(&repo_dir.path().to_path_buf(), Some("zebra"), &headers);
-        assert_eq!(picked, Some("zebra".to_string()));
-        let first_alpha = helpers::strict_repo_from(&repo_dir.path().to_path_buf(), None, &headers);
-        assert_eq!(first_alpha, Some("alpha".to_string()));
-    }
-
     /// Test HEAD / returns 204 No Content like GET
     #[tokio::test]
     async fn test_head_root() {
         let repo_dir = tempdir().unwrap();
-        let state = AppState {
-            repo_path: repo_dir.path().to_path_buf(),
-            static_paths: Vec::new(),
-            default_repo: None,
-            relay_server_id: None,
-            authorized_repos: None,
-            features_manifest: None,
-        };
+        let state = test_state(repo_dir.path().to_path_buf());
 
         let headers = HeaderMap::new();
         let response = handlers::head_root(State(state), headers, None).await;
@@ -295,18 +267,10 @@ mod tests {
             .commit(Some("refs/heads/main"), &sig, &sig, "add file", &tree, &[])
             .unwrap();
 
-        let state = AppState {
-            repo_path: repo_dir.path().to_path_buf(),
-            static_paths: Vec::new(),
-            default_repo: None,
-            relay_server_id: None,
-            authorized_repos: None,
-            features_manifest: None,
-        };
+        let state = test_state(repo_dir.path().to_path_buf());
 
-        let mut headers = HeaderMap::new();
+        let mut headers = host_header("repo");
         headers.insert(HEADER_BRANCH, "main".parse().unwrap());
-        headers.insert(HEADER_REPO, "repo".parse().unwrap());
 
         let response = handlers::head_file(State(state), headers, AxPath("hello.txt".to_string()), None).await;
         let (parts, body) = response.into_response().into_parts();
@@ -338,18 +302,10 @@ mod tests {
             .commit(Some("refs/heads/main"), &sig, &sig, "init", &tree, &[])
             .unwrap();
 
-        let state = AppState {
-            repo_path: repo_dir.path().to_path_buf(),
-            static_paths: Vec::new(),
-            default_repo: None,
-            relay_server_id: None,
-            authorized_repos: None,
-            features_manifest: None,
-        };
+        let state = test_state(repo_dir.path().to_path_buf());
 
-        let mut headers = HeaderMap::new();
+        let mut headers = host_header("repo");
         headers.insert(HEADER_BRANCH, "main".parse().unwrap());
-        headers.insert(HEADER_REPO, "repo".parse().unwrap());
 
         let response = handlers::head_file(
             State(state),
@@ -369,18 +325,10 @@ mod tests {
         let repo_dir = tempdir().unwrap();
         let _ = std::fs::create_dir_all(repo_dir.path());
 
-        let state = AppState {
-            repo_path: repo_dir.path().to_path_buf(),
-            static_paths: Vec::new(),
-            default_repo: None,
-            relay_server_id: None,
-            authorized_repos: None,
-            features_manifest: None,
-        };
+        let state = test_state(repo_dir.path().to_path_buf());
 
-        let mut headers = HeaderMap::new();
+        let mut headers = host_header("nonexistent");
         headers.insert(HEADER_BRANCH, "main".parse().unwrap());
-        headers.insert(HEADER_REPO, "nonexistent".parse().unwrap());
 
         let response = handlers::head_file(State(state), headers, AxPath("file.txt".to_string()), None).await;
         let (parts, _body) = response.into_response().into_parts();
@@ -440,18 +388,10 @@ server:
             .commit(Some("refs/heads/main"), &sig, &sig, "init", &tree, &[])
             .unwrap();
 
-        let state = AppState {
-            repo_path: repo_dir.path().to_path_buf(),
-            static_paths: Vec::new(),
-            default_repo: None,
-            relay_server_id: None,
-            authorized_repos: None,
-            features_manifest: None,
-        };
+        let state = test_state(repo_dir.path().to_path_buf());
 
-        let mut headers = HeaderMap::new();
+        let mut headers = host_header("repo");
         headers.insert(HEADER_BRANCH, "main".parse().unwrap());
-        headers.insert(HEADER_REPO, "repo".parse().unwrap());
 
         let query_body = serde_json::json!({
             "collection": "index",
@@ -522,18 +462,10 @@ process.exit(0);
             .commit(Some("refs/heads/main"), &sig, &sig, "init", &tree, &[])
             .unwrap();
 
-        let state = AppState {
-            repo_path: repo_dir.path().to_path_buf(),
-            static_paths: Vec::new(),
-            default_repo: None,
-            relay_server_id: None,
-            authorized_repos: None,
-            features_manifest: None,
-        };
+        let state = test_state(repo_dir.path().to_path_buf());
 
-        let mut headers = HeaderMap::new();
+        let mut headers = host_header("repo");
         headers.insert(HEADER_BRANCH, "main".parse().unwrap());
-        headers.insert(HEADER_REPO, "repo".parse().unwrap());
 
         // Call with path "Test" instead of "query"
         let response = handlers::handle_query(

@@ -55,9 +55,14 @@ impl Config {
         let tls_key = std::env::var("RELAY_TLS_KEY").ok();
         let acme_dir = std::env::var("RELAY_ACME_DIR").unwrap_or_else(|_| "/var/www/certbot".to_string());
 
-        let default_repo = std::env::var("RELAY_DEFAULT_REPO")
+        let node_fqdn = std::env::var("RELAY_PUBLIC_HOSTNAME")
+            .or_else(|_| std::env::var("RELAY_NODE_FQDN"))
             .ok()
-            .map(|s| s.trim().trim_end_matches(".git").to_string())
+            .map(|s| {
+                s.trim()
+                    .trim_end_matches('.')
+                    .to_ascii_lowercase()
+            })
             .filter(|s| !s.is_empty());
 
         let relay_server_id = std::env::var("RELAY_SERVER_ID")
@@ -112,7 +117,7 @@ impl Config {
             state: AppState {
                 repo_path,
                 static_paths,
-                default_repo,
+                node_fqdn,
                 relay_server_id,
                 authorized_repos,
                 features_manifest,

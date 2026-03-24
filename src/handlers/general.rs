@@ -59,14 +59,15 @@ pub async fn get_swagger_ui() -> impl IntoResponse {
     (StatusCode::OK, [("Content-Type", "text/html")], html)
 }
 
-/// GET /api/config — peers, repo list, default repo, server id, authorized repo names
+/// GET /api/config — peers, repo list, optional `node_fqdn`, server id, authorized repo names
 pub async fn get_api_config(State(state): State<AppState>) -> impl IntoResponse {
     #[derive(Serialize)]
     struct Config {
         peers: Vec<String>,
         repos: Vec<String>,
+        /// Node hostname for HTTP: use **`{repo}.{node_fqdn}`** as `Host` (no `X-Relay-Repo`, no `?repo=`).
         #[serde(skip_serializing_if = "Option::is_none")]
-        default_repo: Option<String>,
+        node_fqdn: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         relay_server_id: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -84,7 +85,6 @@ pub async fn get_api_config(State(state): State<AppState>) -> impl IntoResponse 
         .collect::<Vec<_>>();
 
     let repos = git::bare_repo_names(&state.repo_path);
-    let default_repo = state.default_repo.clone().filter(|d| repos.iter().any(|r| r == d));
 
     let authorized_repos = state.authorized_repos.as_ref().map(|a| {
         a.repos
@@ -105,7 +105,7 @@ pub async fn get_api_config(State(state): State<AppState>) -> impl IntoResponse 
     let config = Config {
         peers: peer_list,
         repos,
-        default_repo,
+        node_fqdn: state.node_fqdn.clone(),
         relay_server_id: state.relay_server_id.clone(),
         authorized_repos,
         installed_features,
@@ -132,12 +132,11 @@ fn summarize_features(m: &std::sync::Arc<serde_json::Value>) -> serde_json::Valu
 }
 
 /// POST /git-pull — fetch from `origin` into a **bare** repo.
-/// Target resolution: `?repo=` (admin) if valid, else `X-Relay-Repo` / subdomain / `RELAY_DEFAULT_REPO` / first repo.
-/// Legacy: `RELAY_REPO_PATH` may point directly at a single `*.git` directory.
+/// Target resolution: **`Host: {repo}.{node_fqdn}`** (same as HTTP file serving). No `?repo=` or `X-Relay-Repo`.
+/// Legacy: if `RELAY_REPO_PATH` is itself a bare `*.git` directory and no per-repo dirs exist, that repo is used.
 pub async fn post_git_pull(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(params): Query<HashMap<String, String>>,
 ) -> impl IntoResponse {
     #[derive(Serialize)]
     struct GitPullResponse {
@@ -151,36 +150,9 @@ pub async fn post_git_pull(
     }
 
     let names = git::bare_repo_names(&state.repo_path);
-    let from_query: Option<(PathBuf, String)> = match params.get("repo") {
-        None => None,
-        Some(q_raw) => {
-            let q = q_raw.trim().trim_end_matches(".git");
-            if q.is_empty() {
-                None
-            } else if names.iter().any(|n| n == q) {
-                Some((state.repo_path.join(format!("{}.git", q)), q.to_string()))
-            } else {
-                let msg = format!("Unknown repo {:?} (known: {:?})", q, names);
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(GitPullResponse {
-                        success: false,
-                        message: msg.clone(),
-                        updated: false,
-                        repo: None,
-                        before_commit: None,
-                        after_commit: None,
-                        error: Some(msg),
-                    }),
-                );
-            }
-        }
-    };
 
-    let (bare_path, repo_label) = if let Some(pair) = from_query {
-        pair
-    } else if let Some(n) =
-        helpers::strict_repo_from(&state.repo_path, state.default_repo.as_deref(), &headers)
+    let (bare_path, repo_label) = if let Some(n) =
+        helpers::repo_from_host(&state.repo_path, state.node_fqdn.as_deref(), &headers)
     {
         (state.repo_path.join(format!("{}.git", n)), n)
     } else if names.is_empty() && Repository::open_bare(&state.repo_path).is_ok() {
@@ -192,7 +164,14 @@ pub async fn post_git_pull(
             .to_string();
         (state.repo_path.clone(), stem)
     } else {
-        let msg = "No bare repository resolved. Clone repos under RELAY_REPO_PATH as name.git, set RELAY_DEFAULT_REPO, or pass ?repo=".to_string();
+        let msg = if state.node_fqdn.is_none() {
+            "No bare repository resolved. Set RELAY_PUBLIC_HOSTNAME to this node's FQDN and call with Host: {repo}.{that-fqdn}; repos live under RELAY_REPO_PATH as <repo>.git".to_string()
+        } else {
+            format!(
+                "No bare repository resolved. Use Host header: {{repo}}.{}",
+                state.node_fqdn.as_deref().unwrap_or("")
+            )
+        };
         return (
             StatusCode::BAD_REQUEST,
             Json(GitPullResponse {
@@ -371,7 +350,7 @@ pub async fn options_capabilities(
 ) -> impl IntoResponse {
     let branch = helpers::branch_from(&headers);
     let repo_name =
-        helpers::strict_repo_from(&state.repo_path, state.default_repo.as_deref(), &headers);
+        helpers::repo_from_host(&state.repo_path, state.node_fqdn.as_deref(), &headers);
 
     let repo_names = git::bare_repo_names(&state.repo_path);
     let mut repos_json: Vec<serde_json::Value> = Vec::new();
@@ -445,15 +424,15 @@ pub async fn get_root(
     StatusCode::NO_CONTENT.into_response()
 }
 
-/// POST /hooks/github — Triggered by GitHub webhooks to pull updates
+/// POST /hooks/github/{repo} — Triggered by GitHub webhooks to pull updates
 pub async fn post_github_hook(
     State(state): State<AppState>,
-    Query(params): Query<HashMap<String, String>>,
+    axum::extract::Path(repo_name): axum::extract::Path<String>,
 ) -> impl IntoResponse {
-    let repo_name = match params.get("repo") {
-        Some(name) => name,
-        None => return (StatusCode::BAD_REQUEST, "Missing repo query parameter").into_response(),
-    };
+    let repo_name = repo_name.trim().trim_end_matches(".git");
+    if repo_name.is_empty() {
+        return (StatusCode::BAD_REQUEST, "Missing repo name").into_response();
+    }
 
     let full_repo_path = state.repo_path.join(format!("{}.git", repo_name));
     if !full_repo_path.exists() {

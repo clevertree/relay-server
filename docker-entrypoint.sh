@@ -85,4 +85,85 @@ log "Starting git daemon on port ${RELAY_GIT_PORT:-9418}"
 git daemon --reuseaddr --base-path="$DATA_ROOT" --export-all --enable=receive-pack --port="${RELAY_GIT_PORT:-9418}" "$DATA_ROOT" &
 
 # Exec the server (inherits RELAY_* env)
-exec /usr/local/bin/relay-server serve
+# Start the relay server in background if we're doing DNS/SSL logic
+# --- Vercel DNS registration (requires VERCEL_API_TOKEN) ---
+VERCEL_API_TOKEN_ENV=${VERCEL_API_TOKEN:-}
+VERCEL_DOMAIN=${RELAY_DNS_DOMAIN:-relaynet.online}
+VERCEL_SUBDOMAIN=${RELAY_DNS_SUBDOMAIN:-node1}
+FQDN="${VERCEL_SUBDOMAIN}.${VERCEL_DOMAIN}"
+
+get_public_ip() {
+  for url in "https://api.ipify.org" "https://ipv4.icanhazip.com" "https://ifconfig.me/ip"; do
+    ip=$(curl -fsS "$url" | tr -d '\r' | tr -d '\n' || true)
+    if [[ "$ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      echo "$ip"
+      return 0
+    fi
+  done
+  return 1
+}
+
+vercel_dns_upsert() {
+  local domain="$1" name="$2" value="$3" type="${4:-A}" ttl="${5:-60}"
+  local auth_header="Authorization: Bearer ${VERCEL_API_TOKEN_ENV}"
+  local base="https://api.vercel.com"
+  local team_q=""
+  [[ -n "${VERCEL_TEAM_ID:-}" ]] && team_q="?teamId=${VERCEL_TEAM_ID}"
+
+  # List existing records (first query param must be ?teamId= or ?name=)
+  local list_url
+  if [[ -n "${VERCEL_TEAM_ID:-}" ]]; then
+    list_url="${base}/v4/domains/${domain}/records?teamId=${VERCEL_TEAM_ID}&name=${name}&type=${type}"
+  else
+    list_url="${base}/v4/domains/${domain}/records?name=${name}&type=${type}"
+  fi
+  local list_raw=$(curl -sS -H "$auth_header" "$list_url" || true)
+  local rec_id=$(echo "$list_raw" | jq -r '.records[] | select(.name=="'"$name"'" and .type=="'"$type"'" ) | .id // .uid' | head -n1 || true)
+
+  if [[ -n "$rec_id" && "$rec_id" != "null" ]]; then
+    local patch_url="${base}/v4/domains/${domain}/records/${rec_id}${team_q}"
+    local body=$(jq -n --arg v "$value" --argjson t $ttl '{ value: $v, ttl: $t }')
+    curl -sS -X PATCH -H "$auth_header" -H 'Content-Type: application/json' -d "$body" "$patch_url" >/dev/null && return 0
+  else
+    local create_url="${base}/v4/domains/${domain}/records${team_q}"
+    local body=$(jq -n --arg n "$name" --arg v "$value" --arg t "$type" --argjson ttl $ttl '{ name: $n, value: $v, type: $t, ttl: $ttl }')
+    curl -sS -X POST -H "$auth_header" -H 'Content-Type: application/json' -d "$body" "$create_url" >/dev/null && return 0
+  fi
+  return 1
+}
+
+if [[ -n "$VERCEL_API_TOKEN_ENV" ]]; then
+  log "Attempting DNS upsert for ${FQDN}"
+  PUB_IP=$(get_public_ip || true)
+  if [[ -n "$PUB_IP" ]]; then
+    if vercel_dns_upsert "$VERCEL_DOMAIN" "$VERCEL_SUBDOMAIN" "$PUB_IP"; then
+      log "DNS upsert successful: ${FQDN} -> ${PUB_IP}"
+    else
+      log "WARN: DNS upsert failed"
+    fi
+  fi
+fi
+
+# Start the server (foreground if no SSL, background if we need certbot)
+SSL_MODE=${RELAY_SSL_MODE:-auto}
+if [[ "$SSL_MODE" != "none" && -n "${RELAY_CERTBOT_EMAIL:-}" && -n "${FQDN:-}" ]]; then
+  log "Starting certbot flow for ${FQDN}"
+  # Start server in background first so it can serve ACME challenges
+  /usr/local/bin/relay-server serve &
+  RELAY_PID=$!
+  sleep 5
+  
+  if certbot certonly --webroot -w "${RELAY_ACME_DIR:-/var/www/certbot}" -d "${FQDN}" -m "${RELAY_CERTBOT_EMAIL}" --agree-tos --non-interactive; then
+    log "Certbot successful"
+    export RELAY_TLS_CERT="/etc/letsencrypt/live/${FQDN}/fullchain.pem"
+    export RELAY_TLS_KEY="/etc/letsencrypt/live/${FQDN}/privkey.pem"
+    kill $RELAY_PID
+    sleep 2
+    exec /usr/local/bin/relay-server serve
+  else
+    log "Certbot failed, falling back to HTTP"
+    wait $RELAY_PID
+  fi
+else
+  exec /usr/local/bin/relay-server serve
+fi
