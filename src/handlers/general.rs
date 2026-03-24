@@ -117,16 +117,34 @@ fn summarize_features(m: &std::sync::Arc<serde_json::Value>) -> serde_json::Valu
     let f = m.get("features").cloned().unwrap_or(serde_json::json!({}));
     let piper = f.get("piper_tts");
     let npm = f.get("npm_extensions");
+    let translation = f.get("text_translation");
+    let voice_count = piper
+        .and_then(|p| p.get("voices"))
+        .and_then(|v| v.as_array())
+        .map(|a| a.len());
+    let pair_count = translation
+        .and_then(|p| p.get("language_pairs"))
+        .and_then(|v| v.as_array())
+        .map(|a| a.len());
     serde_json::json!({
         "http_port": m.get("http_port"),
         "git_port": m.get("git_port"),
         "piper_tts": {
             "enabled": piper.and_then(|p| p.get("enabled")),
             "http_port": piper.and_then(|p| p.get("http_port")),
+            "voice_count": voice_count,
+            "languages": piper.and_then(|p| p.get("languages")),
         },
         "npm_extensions": {
             "enabled": npm.and_then(|p| p.get("enabled")),
             "packages": npm.and_then(|p| p.get("packages")),
+        },
+        "text_translation": {
+            "enabled": translation.and_then(|p| p.get("enabled")),
+            "backend": translation.and_then(|p| p.get("backend")),
+            "language_pair_count": pair_count,
+            "from_languages": translation.and_then(|p| p.get("from_languages")),
+            "to_languages": translation.and_then(|p| p.get("to_languages")),
         },
     })
 }

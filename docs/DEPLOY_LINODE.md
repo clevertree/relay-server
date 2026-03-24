@@ -11,9 +11,9 @@
 | **5. Data** | **`relay-bootstrap.sh`** (catalog or manifest) **or** bare init + **`git push`** from laptop. |
 | **6. Updates** | **Binary upgrade:** new tgz → **`install.sh update`** or **`relay-curl.sh`** with new **`RELAY_DEPLOY_TGZ_URL`**. **Script/hardening only:** **`relay-curl.sh … repair`** (pulls **`relay-install.sh`** from GitHub). |
 
-**Release tarball URL shape (after you push tag `v0.3.1`):**
+**Release tarball URL shape (after you push tag `v0.3.2`):**
 
-`https://github.com/clevertree/relay-server/releases/download/v0.3.1/relay-linode-deploy.tgz`
+`https://github.com/clevertree/relay-server/releases/download/v0.3.2/relay-linode-deploy.tgz`
 
 **Latest `main` tarball:** open the latest successful **publish-linode-tarball** run on **`main`** → **Artifacts** → download **`relay-linode-deploy-<sha>.tgz`**. Or **Run workflow** manually.
 
@@ -95,10 +95,13 @@ ssh root@IP 'cd /root && tar xzf relay-linode-deploy.tgz && sudo ./install.sh in
 | `sudo ./install.sh update` | Refresh binaries from tarball dir; restart services. |
 | `sudo ./install.sh repair` | Re-apply systemd, hooks, npm extensions, Piper service from **`state/features.json`**. If **`features.json`** is missing but **`/opt/relay/bin/relay-server`** exists, a minimal state file is created (Piper/npm off) so repair/update work on manually seeded hosts. |
 | `sudo ./install.sh reconfigure-features` | Re-run feature prompts and rewrite **`features.json`** (only supported way to add/change optional features). |
+| `sudo ./install.sh refresh-features` | Rescan Piper models + Argos packs into **`features.json`** (after adding voices or translation packages). |
 
 **Ports:** HTTP **8080**, git daemon **9418**, Piper HTTP **5590** (if enabled). Data **`/opt/relay/data`**.
 
-**State:** **`/opt/relay/state/features.json`** records enabled features and ports. **`relay-server`** reads it (`RELAY_FEATURES_STATE_PATH` in the unit file) and exposes it under **`GET /api/config`** → **`installed_features`** (`manifest` + `summary`).
+**State:** **`/opt/relay/state/features.json`** records enabled features, ports, and **inventories** (Piper voices, Argos language pairs, npm package list). **`relay-server`** reads it (`RELAY_FEATURES_STATE_PATH` in the unit file) and exposes it under **`GET /api/config`** → **`installed_features`** (`manifest` + `summary`). Peers and clients use that to see what each node offers.
+
+**Feature catalog (Piper TTS, offline translation, npm extensions, subfeatures):** **[INSTALL_FEATURES.md](./INSTALL_FEATURES.md)**.
 
 **Non-interactive install (CI/cloud-init):**
 
@@ -109,6 +112,7 @@ sudo RELAY_INSTALL_NONINTERACTIVE=1 \
   RELAY_PUBLIC_FQDN="atlanta1.relaygateway.net" \
   VERCEL_API_TOKEN="your-token" \
   RELAY_FEAT_PIPER=0 \
+  RELAY_FEAT_TRANSLATION=0 \
   ./install.sh install
 ```
 
@@ -117,7 +121,7 @@ Optional: **`VERCEL_TEAM_ID=...`**, **`RELAY_VERCEL_DOMAIN=relaygateway.net`** (
 Skipping DNS (no token on host, or DNS managed manually):
 
 ```bash
-sudo RELAY_INSTALL_NONINTERACTIVE=1 RELAY_SKIP_VERCEL_DNS=1 RELAY_FEAT_PIPER=1 RELAY_FEAT_NPM_PKGS="songwalker-js" ./install.sh install
+sudo RELAY_INSTALL_NONINTERACTIVE=1 RELAY_SKIP_VERCEL_DNS=1 RELAY_FEAT_PIPER=1 RELAY_FEAT_NPM_PKGS="songwalker-js" RELAY_FEAT_TRANSLATION=1 RELAY_FEAT_TRANSLATION_PKGS="translate-en_es" ./install.sh install
 ```
 
 ---

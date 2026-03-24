@@ -12,6 +12,8 @@ Implements the Relay API over bare Git repositories with static directory servin
 - Optional HTTPS support with automatic certificate loading
 - CORS-enabled; responses may include informational `X-Relay-Repo` / `X-Relay-Branch` (not used for routing)
 
+Install-time **optional capabilities** (Piper TTS, offline Argos translation, npm hook packages) are recorded in **`state/features.json`** and advertised in **`GET /api/config` → `installed_features`** so peers know what each node offers. See **[docs/INSTALL_FEATURES.md](docs/INSTALL_FEATURES.md)**.
+
 ## Repository Policy
 
 - Never import or reference files directly from `apps/` other than code in this crate; prefer shared assets and data in

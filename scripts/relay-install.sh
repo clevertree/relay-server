@@ -17,7 +17,7 @@ PIPER_HTTP_PORT="${RELAY_PIPER_HTTP_PORT:-5590}"
 STATE_DIR="$INSTALL/state"
 FEATURES_JSON="$STATE_DIR/features.json"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-VERSION_MARKER="1"
+VERSION_MARKER="2"
 
 log() { echo "[relay-install] $*" >&2; }
 die() { echo "[relay-install] ERROR: $*" >&2; exit 1; }
@@ -82,51 +82,99 @@ ensure_base_deps() {
   }
 }
 
+refresh_features_inventory() {
+  [[ -f "$SCRIPT_DIR/relay-probe-features.py" ]] || return 0
+  python3 "$SCRIPT_DIR/relay-probe-features.py" merge "$INSTALL" || log "WARN: feature inventory refresh failed"
+}
+
 write_features_json() {
-  local piper_en="$1" npm_en="$2" npm_pkgs_json="$3"
+  local piper_en="$1" npm_en="$2" npm_pkgs_json="$3" trans_en="$4" trans_pkgs_json="$5"
   mkdir -p "$STATE_DIR"
   local model="$INSTALL/lib/piper/models/en_US-lessac-medium.onnx"
-  python3 <<PY
+  RELAY_WFJ_INSTALL="$INSTALL" \
+  RELAY_WFJ_HTTP_PORT="$HTTP_PORT" \
+  RELAY_WFJ_GIT_PORT="$GIT_PORT" \
+  RELAY_WFJ_PIPER_PORT="$PIPER_HTTP_PORT" \
+  RELAY_WFJ_VERSION="$VERSION_MARKER" \
+  RELAY_WFJ_PIPER_EN="$piper_en" \
+  RELAY_WFJ_NPM_EN="$npm_en" \
+  RELAY_WFJ_NPM_PKGS_JSON="$npm_pkgs_json" \
+  RELAY_WFJ_TRANS_EN="$trans_en" \
+  RELAY_WFJ_TRANS_PKGS_JSON="$trans_pkgs_json" \
+  RELAY_WFJ_FEATURES_JSON="$FEATURES_JSON" \
+  RELAY_WFJ_MODEL="$model" \
+    python3 <<'PY'
 import json
-piper = "${piper_en}" == "1"
-npm_on = "${npm_en}" == "1"
-pkgs = json.loads(r'''${npm_pkgs_json}''')
+import os
+
+install = os.environ["RELAY_WFJ_INSTALL"]
+features_path = os.environ["RELAY_WFJ_FEATURES_JSON"]
+model = os.environ["RELAY_WFJ_MODEL"]
+http_port = int(os.environ["RELAY_WFJ_HTTP_PORT"])
+git_port = int(os.environ["RELAY_WFJ_GIT_PORT"])
+piper_port = int(os.environ["RELAY_WFJ_PIPER_PORT"])
+ver = int(os.environ["RELAY_WFJ_VERSION"])
+
+piper = os.environ["RELAY_WFJ_PIPER_EN"] == "1"
+npm_on = os.environ["RELAY_WFJ_NPM_EN"] == "1"
+trans = os.environ["RELAY_WFJ_TRANS_EN"] == "1"
+pkgs = json.loads(os.environ["RELAY_WFJ_NPM_PKGS_JSON"])
+trans_pkgs = json.loads(os.environ["RELAY_WFJ_TRANS_PKGS_JSON"])
+
 data = {
-  "schema_version": int("$VERSION_MARKER"),
-  "install_root": "$INSTALL",
-  "http_port": $HTTP_PORT,
-  "git_port": $GIT_PORT,
-  "features": {
-    "piper_tts": {
-      "enabled": piper,
-      "expected": piper,
-      "binary": "$INSTALL/lib/piper/piper" if piper else None,
-      "models_dir": "$INSTALL/lib/piper/models" if piper else None,
-      "default_model": "$model" if piper else None,
-      "http_port": $PIPER_HTTP_PORT if piper else None,
-      "health_path": "/health" if piper else None,
-      "tts_path": "/tts" if piper else None,
-      "service": "relay-tts-piper.service" if piper else None,
+    "schema_version": ver,
+    "install_root": install,
+    "http_port": http_port,
+    "git_port": git_port,
+    "features": {
+        "piper_tts": {
+            "enabled": piper,
+            "expected": piper,
+            "binary": f"{install}/lib/piper/piper" if piper else None,
+            "models_dir": f"{install}/lib/piper/models" if piper else None,
+            "default_model": model if piper else None,
+            "http_port": piper_port if piper else None,
+            "health_path": "/health" if piper else None,
+            "tts_path": "/tts" if piper else None,
+            "service": "relay-tts-piper.service" if piper else None,
+            "voices": [],
+            "languages": [],
+        },
+        "npm_extensions": {
+            "enabled": npm_on,
+            "expected": npm_on,
+            "directory": f"{install}/node_extensions" if npm_on else None,
+            "packages": pkgs if npm_on else [],
+        },
+        "text_translation": {
+            "enabled": trans,
+            "expected": trans,
+            "backend": "argos_translate_local" if trans else None,
+            "description": "Offline neural translation (no cloud); install language packs via argospm.",
+            "venv_dir": f"{install}/lib/argos-venv" if trans else None,
+            "venv_python": f"{install}/lib/argos-venv/bin/python3" if trans else None,
+            "cli": "argospm" if trans else None,
+            "install_argos_packages": trans_pkgs if trans else [],
+            "language_pairs": [],
+            "from_languages": [],
+            "to_languages": [],
+        },
+        "core": {
+            "relay_server": True,
+            "relay_git_daemon": True,
+            "ports": {"http": http_port, "git_daemon": git_port},
+        },
     },
-    "npm_extensions": {
-      "enabled": npm_on,
-      "expected": npm_on,
-      "directory": "$INSTALL/node_extensions" if npm_on else None,
-      "packages": pkgs if npm_on else [],
-    },
-    "core": {
-      "relay_server": True,
-      "relay_git_daemon": True,
-      "ports": {"http": $HTTP_PORT, "git_daemon": $GIT_PORT},
-    },
-  },
 }
-# strip None for cleaner JSON
+
+
 def strip_none(d):
     if isinstance(d, dict):
         return {k: strip_none(v) for k, v in d.items() if v is not None}
     return d
-with open("$FEATURES_JSON", "w") as f:
+
+
+with open(features_path, "w", encoding="utf-8") as f:
     json.dump(strip_none(data), f, indent=2)
 PY
   chown relay:relay "$FEATURES_JSON" 2>/dev/null || true
@@ -206,6 +254,32 @@ install_npm_extensions() {
   sudo -u relay bash -c "cd '$INSTALL/node_extensions' && (test -f package.json || npm init -y >/dev/null) && npm install --no-save $pkgs"
 }
 
+install_translation_artifacts() {
+  local pm venv_dir pkg
+  pm="$(detect_pm)"
+  case "$pm" in
+    apt) install_packages apt python3-venv python3-pip ;;
+    dnf|yum) install_packages "$pm" python3 python3-pip || true ;;
+    apk) install_packages apk python3 py3-pip python3-dev ;;
+    pacman) install_packages pacman python python-pip ;;
+    zypper) install_packages zypper python311 python311-pip || install_packages zypper python3 python3-pip ;;
+  esac
+  venv_dir="$INSTALL/lib/argos-venv"
+  mkdir -p "$INSTALL/lib"
+  if [[ ! -x "$venv_dir/bin/python3" ]]; then
+    log "Creating Argos Translate venv at $venv_dir"
+    sudo -u relay python3 -m venv "$venv_dir"
+  fi
+  sudo -u relay "$venv_dir/bin/pip" install --upgrade pip setuptools wheel
+  sudo -u relay "$venv_dir/bin/pip" install argostranslate || die "pip install argostranslate failed"
+  chown -R relay:relay "$venv_dir"
+  for pkg in "$@"; do
+    [[ -z "$pkg" ]] && continue
+    log "argospm install $pkg"
+    sudo -u relay "$venv_dir/bin/argospm" install "$pkg" || log "WARN: argospm install $pkg failed (check package name / network)"
+  done
+}
+
 # Copy binary into INSTALL/bin unless it is already that file (repair often uses RELAY_BIN_SOURCE=$INSTALL/bin).
 install_binaries() {
   local src="${RELAY_BIN_SOURCE:-$SCRIPT_DIR}"
@@ -280,16 +354,18 @@ EOF
 }
 
 prompt_features() {
-  local piper=0 npm_en=0 npm_pkgs="songwalker-js"
+  local piper=0 npm_en=0 npm_pkgs="songwalker-js" trans=0 trans_pkgs=""
   if [[ "${RELAY_INSTALL_NONINTERACTIVE:-}" == "1" ]]; then
     [[ "${RELAY_FEAT_PIPER:-0}" == "1" ]] && piper=1
     if [[ -n "${RELAY_FEAT_NPM_PKGS:-}" ]]; then npm_en=1; npm_pkgs="${RELAY_FEAT_NPM_PKGS}"; fi
-    printf '%s\0%s\0%s\0' "$piper" "$npm_en" "$npm_pkgs"
+    [[ "${RELAY_FEAT_TRANSLATION:-0}" == "1" ]] && trans=1
+    trans_pkgs="${RELAY_FEAT_TRANSLATION_PKGS:-}"
+    printf '%s\0%s\0%s\0%s\0%s\0' "$piper" "$npm_en" "$npm_pkgs" "$trans" "$trans_pkgs"
     return
   fi
   if [[ ! -t 0 ]]; then
-    log "non-TTY: set RELAY_INSTALL_NONINTERACTIVE=1 RELAY_FEAT_PIPER=0/1 RELAY_FEAT_NPM_PKGS='pkg1 pkg2'"
-    printf '%s\0%s\0%s\0' "0" "0" ""
+    log "non-TTY: set RELAY_INSTALL_NONINTERACTIVE=1 RELAY_FEAT_PIPER=0/1 RELAY_FEAT_NPM_PKGS='pkg1 pkg2' RELAY_FEAT_TRANSLATION=0/1 RELAY_FEAT_TRANSLATION_PKGS='translate-en_es ...'"
+    printf '%s\0%s\0%s\0%s\0%s\0' "0" "0" "" "0" ""
     return
   fi
   read -r -p "Enable Piper TTS (HTTP on port $PIPER_HTTP_PORT)? [y/N] " a
@@ -300,7 +376,13 @@ prompt_features() {
     read -r -p "Package names (space-separated) [songwalker-js]: " p
     [[ -n "$p" ]] && npm_pkgs="$p"
   fi
-  printf '%s\0%s\0%s\0' "$piper" "$npm_en" "$npm_pkgs"
+  read -r -p "Enable offline text translation (Argos Translate local, no cloud)? [y/N] " c
+  [[ "${c,,}" == "y" ]] && trans=1
+  if [[ "$trans" == "1" ]]; then
+    read -r -p "Argos package ids to install now (space-separated, e.g. translate-en_es), or leave empty: " t
+    trans_pkgs="$t"
+  fi
+  printf '%s\0%s\0%s\0%s\0%s\0' "$piper" "$npm_en" "$npm_pkgs" "$trans" "$trans_pkgs"
 }
 
 pkgs_to_json_array() {
@@ -323,8 +405,8 @@ pkgs_to_json_array() {
 bootstrap_features_json_if_missing() {
   [[ -f "$FEATURES_JSON" ]] && return 0
   [[ -f "$INSTALL/bin/relay-server" ]] || return 0
-  log "No $FEATURES_JSON — bootstrapping minimal state (Piper/npm off). Use reconfigure-features to enable."
-  write_features_json 0 0 "[]"
+  log "No $FEATURES_JSON — bootstrapping minimal state (Piper/npm/translation off). Use reconfigure-features to enable."
+  write_features_json 0 0 "[]" 0 "$(pkgs_to_json_array "")"
 }
 
 # --- Vercel DNS (install-time; same token env as Docker/K8s: VERCEL_API_TOKEN, optional VERCEL_TEAM_ID) ---
@@ -574,15 +656,20 @@ do_install() {
   configure_vercel_dns_first
   ensure_base_deps
   ensure_user_relay
-  { IFS= read -r -d '' piper_en && IFS= read -r -d '' npm_en && IFS= read -r -d '' npm_pkgs; } < <(prompt_features)
-  local npm_json
+  { IFS= read -r -d '' piper_en && IFS= read -r -d '' npm_en && IFS= read -r -d '' npm_pkgs && IFS= read -r -d '' trans_en && IFS= read -r -d '' trans_pkgs; } < <(prompt_features)
+  local npm_json trans_json
   npm_json="$(pkgs_to_json_array "$npm_pkgs")"
-  write_features_json "$piper_en" "$npm_en" "$npm_json"
+  trans_json="$(pkgs_to_json_array "$trans_pkgs")"
+  write_features_json "$piper_en" "$npm_en" "$npm_json" "$trans_en" "$trans_json"
   install_binaries
   write_gitconfig_hooks
   write_systemd_core
   [[ "$piper_en" == "1" ]] && install_piper_artifacts
   [[ "$npm_en" == "1" && -n "$npm_pkgs" ]] && install_npm_extensions "$npm_pkgs"
+  if [[ "$trans_en" == "1" ]]; then
+    install_translation_artifacts $trans_pkgs
+  fi
+  refresh_features_inventory
 
   touch "$INSTALL/relay.env"
   chown relay:relay "$INSTALL/relay.env"
@@ -600,6 +687,7 @@ do_update() {
   bootstrap_features_json_if_missing
   [[ -f "$FEATURES_JSON" ]] || die "run install first (or ensure $INSTALL/bin/relay-server exists)"
   install_binaries
+  refresh_features_inventory
   systemctl restart relay-git-daemon relay-server
   systemctl try-restart relay-tts-piper 2>/dev/null || true
   log "Binaries updated"
@@ -611,9 +699,10 @@ do_repair() {
   [[ -f "$FEATURES_JSON" ]] || die "run install first, or deploy binaries to $INSTALL/bin first"
   ensure_base_deps
   ensure_user_relay
-  local piper_en npm_en
+  local piper_en npm_en trans_en
   piper_en="$(jq -r '.features.piper_tts.enabled // false' "$FEATURES_JSON" 2>/dev/null || echo false)"
   npm_en="$(jq -r '.features.npm_extensions.enabled // false' "$FEATURES_JSON" 2>/dev/null || echo false)"
+  trans_en="$(jq -r '.features.text_translation.enabled // false' "$FEATURES_JSON" 2>/dev/null || echo false)"
   chown -R relay:relay "$INSTALL"
   install_binaries
   write_gitconfig_hooks
@@ -628,6 +717,14 @@ do_repair() {
     pkgs="$(jq -r '.features.npm_extensions.packages | join(" ")' "$FEATURES_JSON")"
     [[ -n "$pkgs" ]] && install_npm_extensions "$pkgs"
   fi
+  if [[ "$trans_en" == "true" ]]; then
+    if [[ ! -x "$INSTALL/lib/argos-venv/bin/python3" ]]; then
+      local apks
+      apks="$(jq -r '.features.text_translation.install_argos_packages | join(" ")' "$FEATURES_JSON" 2>/dev/null || true)"
+      install_translation_artifacts $apks
+    fi
+  fi
+  refresh_features_inventory
   systemctl restart relay-git-daemon relay-server
   maybe_ufw
   log "Repair complete"
@@ -642,11 +739,12 @@ do_reconfigure_features() {
     read -r -p "[y/N] " c
     [[ "${c,,}" == "y" ]] || exit 0
   fi
-  { IFS= read -r -d '' piper_en && IFS= read -r -d '' npm_en && IFS= read -r -d '' npm_pkgs; } < <(prompt_features)
-  local npm_json
+  { IFS= read -r -d '' piper_en && IFS= read -r -d '' npm_en && IFS= read -r -d '' npm_pkgs && IFS= read -r -d '' trans_en && IFS= read -r -d '' trans_pkgs; } < <(prompt_features)
+  local npm_json trans_json
   npm_json="$(pkgs_to_json_array "$npm_pkgs")"
+  trans_json="$(pkgs_to_json_array "$trans_pkgs")"
   systemctl stop relay-tts-piper 2>/dev/null || true
-  write_features_json "$piper_en" "$npm_en" "$npm_json"
+  write_features_json "$piper_en" "$npm_en" "$npm_json" "$trans_en" "$trans_json"
   if [[ "$piper_en" == "1" ]]; then
     rm -rf "$INSTALL/lib/piper" 2>/dev/null || true
     install_piper_artifacts
@@ -662,6 +760,13 @@ do_reconfigure_features() {
   else
     rm -rf "$INSTALL/node_extensions" 2>/dev/null || true
   fi
+  if [[ "$trans_en" == "1" ]]; then
+    rm -rf "$INSTALL/lib/argos-venv" 2>/dev/null || true
+    install_translation_artifacts $trans_pkgs
+  else
+    rm -rf "$INSTALL/lib/argos-venv" 2>/dev/null || true
+  fi
+  refresh_features_inventory
   systemctl restart relay-server
   log "Features reconfigured"
 }
@@ -677,18 +782,30 @@ maybe_ufw() {
   ufw --force enable 2>/dev/null || true
 }
 
+do_refresh_features() {
+  need_root
+  bootstrap_features_json_if_missing
+  [[ -f "$FEATURES_JSON" ]] || die "run install first (no $FEATURES_JSON)"
+  refresh_features_inventory
+  systemctl try-restart relay-server 2>/dev/null || true
+  log "Feature inventory refreshed (Piper voices / Argos language pairs → $FEATURES_JSON)"
+}
+
 case "${1:-install}" in
   install) shift; do_install "$@" ;;
   update) shift; do_update "$@" ;;
   repair) shift; do_repair "$@" ;;
   reconfigure-features) shift; do_reconfigure_features "$@" ;;
+  refresh-features) shift; do_refresh_features "$@" ;;
   -h|--help)
-    echo "Usage: $0 {install|update|repair|reconfigure-features}"
-    echo "  install   — Vercel DNS first (unless skipped), then base deps; Piper + npm prompts (or RELAY_INSTALL_NONINTERACTIVE=1)"
+    echo "Usage: $0 {install|update|repair|reconfigure-features|refresh-features}"
+    echo "  install   — Vercel DNS first (unless skipped), then base deps; Piper + npm + translation prompts (or RELAY_INSTALL_NONINTERACTIVE=1)"
     echo "  DNS env: RELAY_PUBLIC_FQDN, VERCEL_API_TOKEN, optional VERCEL_TEAM_ID, RELAY_VERCEL_DOMAIN, RELAY_SKIP_VERCEL_DNS=1"
-    echo "  update    — refresh relay-server binaries from this directory"
+    echo "  Features env: RELAY_FEAT_PIPER, RELAY_FEAT_NPM_PKGS, RELAY_FEAT_TRANSLATION, RELAY_FEAT_TRANSLATION_PKGS (see docs/INSTALL_FEATURES.md)"
+    echo "  update    — refresh relay-server binaries from this directory; rescan feature inventory"
     echo "  repair    — fix perms, reinstall features from state/features.json (bootstraps minimal state if missing)"
-    echo "  reconfigure-features — change Piper/npm (only supported way to add/remove features)"
+    echo "  reconfigure-features — change Piper/npm/translation (only supported way to add/remove optional features)"
+    echo "  refresh-features — rescan Piper models + Argos packs into features.json (after adding voices or translation packages)"
     exit 0
     ;;
   *) die "unknown command: ${1:-}; try --help" ;;

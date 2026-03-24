@@ -72,7 +72,8 @@ ensure_tools
 log "Fetching install scripts ($RELAY_REF)…"
 curl -fsSL "$BASE_RAW/scripts/relay-install.sh" -o "$WORKDIR/relay-install.sh"
 curl -fsSL "$BASE_RAW/scripts/piper-tts-http.py" -o "$WORKDIR/piper-tts-http.py"
-chmod +x "$WORKDIR/relay-install.sh"
+curl -fsSL "$BASE_RAW/scripts/relay-probe-features.py" -o "$WORKDIR/relay-probe-features.py"
+chmod +x "$WORKDIR/relay-install.sh" "$WORKDIR/relay-probe-features.py"
 
 INSTALL="${RELAY_INSTALL_ROOT:-/opt/relay}"
 CMD="${1:-install}"
