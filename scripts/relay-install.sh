@@ -14,6 +14,9 @@ INSTALL="${RELAY_INSTALL_ROOT:-/opt/relay}"
 HTTP_PORT="${RELAY_HTTP_PORT:-8080}"
 GIT_PORT="${RELAY_GIT_PORT:-9418}"
 PIPER_HTTP_PORT="${RELAY_PIPER_HTTP_PORT:-5590}"
+# LibreTranslate: segment HTTP /translate API (optional); venv under RELAY_LIBRETRANSLATE_ROOT.
+LIBRETRANSLATE_PORT="${RELAY_LIBRETRANSLATE_PORT:-5588}"
+LIBRETRANSLATE_ROOT="${RELAY_LIBRETRANSLATE_ROOT:-/opt/libretranslate}"
 STATE_DIR="$INSTALL/state"
 FEATURES_JSON="$STATE_DIR/features.json"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -88,19 +91,23 @@ refresh_features_inventory() {
 }
 
 write_features_json() {
-  local piper_en="$1" npm_en="$2" npm_pkgs_json="$3" trans_en="$4" trans_pkgs_json="$5"
+  local piper_en="$1" npm_en="$2" npm_pkgs_json="$3" trans_en="$4" trans_pkgs_json="$5" lt_en="$6"
   mkdir -p "$STATE_DIR"
   local model="$INSTALL/lib/piper/models/en_US-lessac-medium.onnx"
   RELAY_WFJ_INSTALL="$INSTALL" \
   RELAY_WFJ_HTTP_PORT="$HTTP_PORT" \
   RELAY_WFJ_GIT_PORT="$GIT_PORT" \
   RELAY_WFJ_PIPER_PORT="$PIPER_HTTP_PORT" \
+  RELAY_WFJ_LT_PORT="$LIBRETRANSLATE_PORT" \
+  RELAY_WFJ_LT_ROOT="$LIBRETRANSLATE_ROOT" \
   RELAY_WFJ_VERSION="$VERSION_MARKER" \
   RELAY_WFJ_PIPER_EN="$piper_en" \
   RELAY_WFJ_NPM_EN="$npm_en" \
   RELAY_WFJ_NPM_PKGS_JSON="$npm_pkgs_json" \
   RELAY_WFJ_TRANS_EN="$trans_en" \
   RELAY_WFJ_TRANS_PKGS_JSON="$trans_pkgs_json" \
+  RELAY_WFJ_LT_EN="$lt_en" \
+  RELAY_WFJ_LT_LOAD="${RELAY_LIBRETRANSLATE_LOAD_ONLY:-en,ru}" \
   RELAY_WFJ_FEATURES_JSON="$FEATURES_JSON" \
   RELAY_WFJ_MODEL="$model" \
     python3 <<'PY'
@@ -113,11 +120,15 @@ model = os.environ["RELAY_WFJ_MODEL"]
 http_port = int(os.environ["RELAY_WFJ_HTTP_PORT"])
 git_port = int(os.environ["RELAY_WFJ_GIT_PORT"])
 piper_port = int(os.environ["RELAY_WFJ_PIPER_PORT"])
+lt_port = int(os.environ["RELAY_WFJ_LT_PORT"])
+lt_root = os.environ["RELAY_WFJ_LT_ROOT"]
 ver = int(os.environ["RELAY_WFJ_VERSION"])
 
 piper = os.environ["RELAY_WFJ_PIPER_EN"] == "1"
 npm_on = os.environ["RELAY_WFJ_NPM_EN"] == "1"
 trans = os.environ["RELAY_WFJ_TRANS_EN"] == "1"
+lt = os.environ["RELAY_WFJ_LT_EN"] == "1"
+lt_load = os.environ.get("RELAY_WFJ_LT_LOAD", "en,ru").strip() or "en,ru"
 pkgs = json.loads(os.environ["RELAY_WFJ_NPM_PKGS_JSON"])
 trans_pkgs = json.loads(os.environ["RELAY_WFJ_TRANS_PKGS_JSON"])
 
@@ -158,6 +169,17 @@ data = {
             "language_pairs": [],
             "from_languages": [],
             "to_languages": [],
+        },
+        "libretranslate_api": {
+            "enabled": lt,
+            "expected": lt,
+            "description": "LibreTranslate HTTP API for chunked text/html translation (self-hosted).",
+            "http_port": lt_port if lt else None,
+            "load_only": lt_load if lt else None,
+            "venv_dir": f"{lt_root}/venv" if lt else None,
+            "service": "libretranslate.service" if lt else None,
+            "translate_path": "/translate" if lt else None,
+            "languages_path": "/languages" if lt else None,
         },
         "core": {
             "relay_server": True,
@@ -280,6 +302,61 @@ install_translation_artifacts() {
   done
 }
 
+write_libretranslate_systemd() {
+  local load="${1:-en,ru}"
+  mkdir -p "$LIBRETRANSLATE_ROOT"
+  chown relay:relay "$LIBRETRANSLATE_ROOT" 2>/dev/null || true
+  cat >/etc/systemd/system/libretranslate.service <<EOF
+[Unit]
+Description=LibreTranslate HTTP API ($load)
+After=network.target
+
+[Service]
+Type=simple
+User=relay
+Group=relay
+WorkingDirectory=$LIBRETRANSLATE_ROOT
+ExecStart=$LIBRETRANSLATE_ROOT/venv/bin/libretranslate --host 0.0.0.0 --port $LIBRETRANSLATE_PORT --load-only $load --char-limit -1 --req-limit -1 --hourly-req-limit -1 --daily-req-limit -1 --disable-web-ui --threads 2
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl daemon-reload
+}
+
+install_libretranslate_artifacts() {
+  local pm load
+  pm="$(detect_pm)"
+  case "$pm" in
+    apt) install_packages apt python3-venv python3-pip ;;
+    dnf|yum) install_packages "$pm" python3 python3-pip || true ;;
+    apk) install_packages apk python3 py3-pip python3-dev ;;
+    pacman) install_packages pacman python python-pip ;;
+    zypper) install_packages zypper python3 python3-pip || true ;;
+    *) install_packages "$pm" python3 python3-pip 2>/dev/null || true ;;
+  esac
+  load="${RELAY_LIBRETRANSLATE_LOAD_ONLY:-}"
+  if [[ -z "$load" && -f "$FEATURES_JSON" ]]; then
+    load="$(jq -r '.features.libretranslate_api.load_only // empty' "$FEATURES_JSON" 2>/dev/null || true)"
+  fi
+  [[ -z "$load" ]] && load="en,ru"
+  mkdir -p "$LIBRETRANSLATE_ROOT"
+  chown relay:relay "$LIBRETRANSLATE_ROOT"
+  if [[ ! -x "$LIBRETRANSLATE_ROOT/venv/bin/python3" ]]; then
+    log "Creating LibreTranslate venv at $LIBRETRANSLATE_ROOT/venv"
+    sudo -u relay python3 -m venv "$LIBRETRANSLATE_ROOT/venv"
+  fi
+  sudo -u relay "$LIBRETRANSLATE_ROOT/venv/bin/pip" install --upgrade pip setuptools wheel
+  sudo -u relay "$LIBRETRANSLATE_ROOT/venv/bin/pip" install "libretranslate>=1.6,<2" || die "pip install libretranslate failed"
+  chown -R relay:relay "$LIBRETRANSLATE_ROOT"
+  write_libretranslate_systemd "$load"
+  systemctl enable libretranslate 2>/dev/null || true
+  systemctl restart libretranslate || log "WARN: libretranslate start failed (first run downloads models; check journalctl -u libretranslate)"
+}
+
 # Copy binary into INSTALL/bin unless it is already that file (repair often uses RELAY_BIN_SOURCE=$INSTALL/bin).
 install_binaries() {
   local src="${RELAY_BIN_SOURCE:-$SCRIPT_DIR}"
@@ -354,18 +431,19 @@ EOF
 }
 
 prompt_features() {
-  local piper=0 npm_en=0 npm_pkgs="songwalker-js" trans=0 trans_pkgs=""
+  local piper=0 npm_en=0 npm_pkgs="songwalker-js" trans=0 trans_pkgs="" lt=0
   if [[ "${RELAY_INSTALL_NONINTERACTIVE:-}" == "1" ]]; then
     [[ "${RELAY_FEAT_PIPER:-0}" == "1" ]] && piper=1
     if [[ -n "${RELAY_FEAT_NPM_PKGS:-}" ]]; then npm_en=1; npm_pkgs="${RELAY_FEAT_NPM_PKGS}"; fi
     [[ "${RELAY_FEAT_TRANSLATION:-0}" == "1" ]] && trans=1
     trans_pkgs="${RELAY_FEAT_TRANSLATION_PKGS:-}"
-    printf '%s\0%s\0%s\0%s\0%s\0' "$piper" "$npm_en" "$npm_pkgs" "$trans" "$trans_pkgs"
+    [[ "${RELAY_FEAT_LIBRETRANSLATE:-0}" == "1" ]] && lt=1
+    printf '%s\0%s\0%s\0%s\0%s\0%s\0' "$piper" "$npm_en" "$npm_pkgs" "$trans" "$trans_pkgs" "$lt"
     return
   fi
   if [[ ! -t 0 ]]; then
-    log "non-TTY: set RELAY_INSTALL_NONINTERACTIVE=1 RELAY_FEAT_PIPER=0/1 RELAY_FEAT_NPM_PKGS='pkg1 pkg2' RELAY_FEAT_TRANSLATION=0/1 RELAY_FEAT_TRANSLATION_PKGS='translate-en_es ...'"
-    printf '%s\0%s\0%s\0%s\0%s\0' "0" "0" "" "0" ""
+    log "non-TTY: set RELAY_INSTALL_NONINTERACTIVE=1 … RELAY_FEAT_LIBRETRANSLATE=0/1 RELAY_LIBRETRANSLATE_LOAD_ONLY=en,ru"
+    printf '%s\0%s\0%s\0%s\0%s\0%s\0' "0" "0" "" "0" "" "0"
     return
   fi
   read -r -p "Enable Piper TTS (HTTP on port $PIPER_HTTP_PORT)? [y/N] " a
@@ -382,7 +460,13 @@ prompt_features() {
     read -r -p "Argos package ids to install now (space-separated, e.g. translate-en_es), or leave empty: " t
     trans_pkgs="$t"
   fi
-  printf '%s\0%s\0%s\0%s\0%s\0' "$piper" "$npm_en" "$npm_pkgs" "$trans" "$trans_pkgs"
+  read -r -p "Enable LibreTranslate HTTP API (port $LIBRETRANSLATE_PORT; POST /translate for chunked book jobs)? [y/N] " z
+  [[ "${z,,}" == "y" ]] && lt=1
+  if [[ "$lt" == "1" ]]; then
+    read -r -p "LibreTranslate --load-only language codes [en,ru]: " lo
+    [[ -n "$lo" ]] && RELAY_LIBRETRANSLATE_LOAD_ONLY="$lo"
+  fi
+  printf '%s\0%s\0%s\0%s\0%s\0%s\0' "$piper" "$npm_en" "$npm_pkgs" "$trans" "$trans_pkgs" "$lt"
 }
 
 pkgs_to_json_array() {
@@ -406,7 +490,7 @@ bootstrap_features_json_if_missing() {
   [[ -f "$FEATURES_JSON" ]] && return 0
   [[ -f "$INSTALL/bin/relay-server" ]] || return 0
   log "No $FEATURES_JSON — bootstrapping minimal state (Piper/npm/translation off). Use reconfigure-features to enable."
-  write_features_json 0 0 "[]" 0 "$(pkgs_to_json_array "")"
+  write_features_json 0 0 "[]" 0 "$(pkgs_to_json_array "")" 0
 }
 
 # --- Vercel DNS (install-time; same token env as Docker/K8s: VERCEL_API_TOKEN, optional VERCEL_TEAM_ID) ---
@@ -690,11 +774,11 @@ do_install() {
   configure_vercel_dns_first
   ensure_base_deps
   ensure_user_relay
-  { IFS= read -r -d '' piper_en && IFS= read -r -d '' npm_en && IFS= read -r -d '' npm_pkgs && IFS= read -r -d '' trans_en && IFS= read -r -d '' trans_pkgs; } < <(prompt_features)
+  { IFS= read -r -d '' piper_en && IFS= read -r -d '' npm_en && IFS= read -r -d '' npm_pkgs && IFS= read -r -d '' trans_en && IFS= read -r -d '' trans_pkgs && IFS= read -r -d '' lt_en; } < <(prompt_features)
   local npm_json trans_json
   npm_json="$(pkgs_to_json_array "$npm_pkgs")"
   trans_json="$(pkgs_to_json_array "$trans_pkgs")"
-  write_features_json "$piper_en" "$npm_en" "$npm_json" "$trans_en" "$trans_json"
+  write_features_json "$piper_en" "$npm_en" "$npm_json" "$trans_en" "$trans_json" "$lt_en"
   install_binaries
   write_gitconfig_hooks
   write_systemd_core
@@ -702,6 +786,9 @@ do_install() {
   [[ "$npm_en" == "1" && -n "$npm_pkgs" ]] && install_npm_extensions "$npm_pkgs"
   if [[ "$trans_en" == "1" ]]; then
     install_translation_artifacts $trans_pkgs
+  fi
+  if [[ "$lt_en" == "1" ]]; then
+    install_libretranslate_artifacts
   fi
   refresh_features_inventory
 
@@ -713,9 +800,10 @@ do_install() {
   systemctl enable relay-server relay-git-daemon
   systemctl restart relay-git-daemon relay-server
   [[ "$piper_en" == "1" ]] && systemctl restart relay-tts-piper 2>/dev/null || true
+  [[ "$lt_en" == "1" ]] && systemctl restart libretranslate 2>/dev/null || true
 
   maybe_ufw
-  log "Install complete. HTTP :$HTTP_PORT  git :$GIT_PORT  config: GET /api/config"
+  log "Install complete. HTTP :$HTTP_PORT  git :$GIT_PORT  LibreTranslate :$LIBRETRANSLATE_PORT (if enabled)  config: GET /api/config"
 }
 
 do_update() {
@@ -726,6 +814,7 @@ do_update() {
   refresh_features_inventory
   systemctl restart relay-git-daemon relay-server
   systemctl try-restart relay-tts-piper 2>/dev/null || true
+  systemctl try-restart libretranslate 2>/dev/null || true
   log "Binaries updated"
 }
 
@@ -739,6 +828,8 @@ do_repair() {
   piper_en="$(jq -r '.features.piper_tts.enabled // false' "$FEATURES_JSON" 2>/dev/null || echo false)"
   npm_en="$(jq -r '.features.npm_extensions.enabled // false' "$FEATURES_JSON" 2>/dev/null || echo false)"
   trans_en="$(jq -r '.features.text_translation.enabled // false' "$FEATURES_JSON" 2>/dev/null || echo false)"
+  local lt_en
+  lt_en="$(jq -r '.features.libretranslate_api.enabled // false' "$FEATURES_JSON" 2>/dev/null || echo false)"
   chown -R relay:relay "$INSTALL"
   install_binaries
   write_gitconfig_hooks
@@ -760,6 +851,17 @@ do_repair() {
       install_translation_artifacts $apks
     fi
   fi
+  if [[ "$lt_en" == "true" ]]; then
+    if [[ ! -x "$LIBRETRANSLATE_ROOT/venv/bin/libretranslate" ]]; then
+      install_libretranslate_artifacts
+    else
+      local lo
+      lo="$(jq -r '.features.libretranslate_api.load_only // "en,ru"' "$FEATURES_JSON" 2>/dev/null || echo en,ru)"
+      write_libretranslate_systemd "$lo"
+      systemctl enable libretranslate 2>/dev/null || true
+      systemctl restart libretranslate 2>/dev/null || true
+    fi
+  fi
   refresh_features_inventory
   systemctl restart relay-git-daemon relay-server
   maybe_ufw
@@ -775,12 +877,13 @@ do_reconfigure_features() {
     read -r -p "[y/N] " c
     [[ "${c,,}" == "y" ]] || exit 0
   fi
-  { IFS= read -r -d '' piper_en && IFS= read -r -d '' npm_en && IFS= read -r -d '' npm_pkgs && IFS= read -r -d '' trans_en && IFS= read -r -d '' trans_pkgs; } < <(prompt_features)
+  { IFS= read -r -d '' piper_en && IFS= read -r -d '' npm_en && IFS= read -r -d '' npm_pkgs && IFS= read -r -d '' trans_en && IFS= read -r -d '' trans_pkgs && IFS= read -r -d '' lt_en; } < <(prompt_features)
   local npm_json trans_json
   npm_json="$(pkgs_to_json_array "$npm_pkgs")"
   trans_json="$(pkgs_to_json_array "$trans_pkgs")"
   systemctl stop relay-tts-piper 2>/dev/null || true
-  write_features_json "$piper_en" "$npm_en" "$npm_json" "$trans_en" "$trans_json"
+  systemctl stop libretranslate 2>/dev/null || true
+  write_features_json "$piper_en" "$npm_en" "$npm_json" "$trans_en" "$trans_json" "$lt_en"
   if [[ "$piper_en" == "1" ]]; then
     rm -rf "$INSTALL/lib/piper" 2>/dev/null || true
     install_piper_artifacts
@@ -802,8 +905,15 @@ do_reconfigure_features() {
   else
     rm -rf "$INSTALL/lib/argos-venv" 2>/dev/null || true
   fi
+  if [[ "$lt_en" == "1" ]]; then
+    install_libretranslate_artifacts
+  else
+    systemctl disable libretranslate 2>/dev/null || true
+    systemctl stop libretranslate 2>/dev/null || true
+  fi
   refresh_features_inventory
   systemctl restart relay-server
+  maybe_ufw
   log "Features reconfigured"
 }
 
@@ -815,6 +925,9 @@ maybe_ufw() {
   local piper_en
   piper_en="$(jq -r '.features.piper_tts.enabled // false' "$FEATURES_JSON" 2>/dev/null || echo false)"
   [[ "$piper_en" == "true" ]] && ufw allow "$PIPER_HTTP_PORT/tcp" 2>/dev/null || true
+  local lt_u
+  lt_u="$(jq -r '.features.libretranslate_api.enabled // false' "$FEATURES_JSON" 2>/dev/null || echo false)"
+  [[ "$lt_u" == "true" ]] && ufw allow "$LIBRETRANSLATE_PORT/tcp" 2>/dev/null || true
   ufw --force enable 2>/dev/null || true
 }
 
@@ -837,7 +950,7 @@ case "${1:-install}" in
     echo "Usage: $0 {install|update|repair|reconfigure-features|refresh-features}"
     echo "  install   — Vercel DNS first (unless skipped), then base deps; Piper + npm + translation prompts (or RELAY_INSTALL_NONINTERACTIVE=1)"
     echo "  DNS env: RELAY_PUBLIC_FQDN, VERCEL_API_TOKEN, optional VERCEL_TEAM_ID, RELAY_VERCEL_DOMAIN, RELAY_SKIP_VERCEL_DNS=1"
-    echo "  Features env: RELAY_FEAT_PIPER, RELAY_FEAT_NPM_PKGS, RELAY_FEAT_TRANSLATION, RELAY_FEAT_TRANSLATION_PKGS (see docs/INSTALL_FEATURES.md)"
+    echo "  Features env: RELAY_FEAT_PIPER, RELAY_FEAT_NPM_PKGS, RELAY_FEAT_TRANSLATION, RELAY_FEAT_TRANSLATION_PKGS, RELAY_FEAT_LIBRETRANSLATE, RELAY_LIBRETRANSLATE_LOAD_ONLY (see docs/INSTALL_FEATURES.md)"
     echo "  Node env: RELAY_SERVER_ID, RELAY_PUBLIC_HOSTNAME (if RELAY_SKIP_VERCEL_DNS=1), RELAY_MASTER_PEER_LIST (semicolon-separated peer FQDNs)"
     echo "  update    — refresh relay-server binaries from this directory; rescan feature inventory"
     echo "  repair    — fix perms, reinstall features from state/features.json (bootstraps minimal state if missing)"

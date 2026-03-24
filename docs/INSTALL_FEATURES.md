@@ -131,7 +131,7 @@ There is no background mesh sync yet: each peer should call **`GET /api/config`*
 
 Recommended client behaviour:
 
-- Prefer nodes that advertise the **`text_translation`** / **`piper_tts`** capability you need.
+- Prefer nodes that advertise **`libretranslate_api`**, **`text_translation`**, or **`piper_tts`** as needed.
 - When **`voice_count`** or **`language_pair_count`** is zero, treat the feature as “enabled but not provisioned” and fall back to another peer or a local-only path.
 
 ---
@@ -144,21 +144,25 @@ Recommended client behaviour:
 | `RELAY_FEAT_NPM_PKGS='pkg …'` | npm extensions |
 | `RELAY_FEAT_TRANSLATION=1` | Argos offline translation |
 | `RELAY_FEAT_TRANSLATION_PKGS='translate-en_es …'` | Argos packs to install during that run |
+| `RELAY_FEAT_LIBRETRANSLATE=1` | LibreTranslate HTTP API (**`libretranslate.service`**, venv under **`RELAY_LIBRETRANSLATE_ROOT`**) |
+| `RELAY_LIBRETRANSLATE_LOAD_ONLY` | Comma-separated language codes for LibreTranslate (default **`en,ru`**) |
+| `RELAY_LIBRETRANSLATE_PORT` | LibreTranslate listen port (default **5588**) |
+| `RELAY_LIBRETRANSLATE_ROOT` | Install directory (default **`/opt/libretranslate`**) |
 
-Combine with **`RELAY_INSTALL_NONINTERACTIVE=1`** for cloud-init / CI (see **DEPLOY_LINODE.md**).
+Combine with **`RELAY_INSTALL_NONINTERACTIVE=1`** for cloud-init / CI (see **DEPLOY_LINODE.md**). **`repair`** / **`update`** restart LibreTranslate when it is enabled in **`features.json`**; **`ufw`** opens **`RELAY_LIBRETRANSLATE_PORT`** when the feature is on.
 
 ---
 
-## Optional: LibreTranslate HTTP API (manual / ops)
+## Optional: LibreTranslate HTTP API (installer or manual)
 
-Some nodes run **[LibreTranslate](https://github.com/LibreTranslate/LibreTranslate)** alongside Relay for a **segment HTTP API** (many small **`POST /translate`** calls work well for book-scale jobs). This is **not** installed by **`install.sh`** today; it is an operational add-on (venv + systemd on the VM).
+**[LibreTranslate](https://github.com/LibreTranslate/LibreTranslate)** provides a **segment HTTP API** (many **`POST /translate`** calls suit long books). Enable it during **`install`** or **`reconfigure-features`** (TTY prompt), or set **`RELAY_FEAT_LIBRETRANSLATE=1`** non-interactively. The installer records **`features.libretranslate_api`** in **`features.json`**, installs a venv, writes **`libretranslate.service`**, and opens the firewall port.
 
 ### Calling it by domain (recommended)
 
-LibreTranslate listens on **`0.0.0.0:5588`** (or whatever port you choose). Clients should use the **same node FQDN** as Relay’s **`RELAY_PUBLIC_HOSTNAME`**, not the raw IP:
+LibreTranslate listens on **`0.0.0.0:`** + **`RELAY_LIBRETRANSLATE_PORT`** (default **5588**). Clients should use the **same node FQDN** as Relay’s **`RELAY_PUBLIC_HOSTNAME`**:
 
-- **Base URL:** **`http://{RELAY_PUBLIC_HOSTNAME}:5588`**
-- **Example:** **`http://atlanta1.relaygateway.net:5588`**
+- **Base URL:** **`http://{RELAY_PUBLIC_HOSTNAME}:{port}`**
+- **Example:** **`http://dallas1.relaygateway.net:5588`**
 
 As long as the **A record** for that name points at the server (same as Relay HTTP), **`curl`**, scripts, and apps can use the hostname directly; DNS resolves to the IP and the connection is identical to using the address literally.
 
@@ -172,7 +176,7 @@ As long as the **A record** for that name points at the server (same as Relay HT
 Example:
 
 ```bash
-curl -sS -X POST "http://atlanta1.relaygateway.net:5588/translate" \
+curl -sS -X POST "http://dallas1.relaygateway.net:5588/translate" \
   -H "Content-Type: application/json" \
   -d '{"q":"Hello","source":"en","target":"ru","format":"text"}'
 ```

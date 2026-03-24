@@ -118,6 +118,7 @@ fn summarize_features(m: &std::sync::Arc<serde_json::Value>) -> serde_json::Valu
     let piper = f.get("piper_tts");
     let npm = f.get("npm_extensions");
     let translation = f.get("text_translation");
+    let libre = f.get("libretranslate_api");
     let voice_count = piper
         .and_then(|p| p.get("voices"))
         .and_then(|v| v.as_array())
@@ -145,6 +146,11 @@ fn summarize_features(m: &std::sync::Arc<serde_json::Value>) -> serde_json::Valu
             "language_pair_count": pair_count,
             "from_languages": translation.and_then(|p| p.get("from_languages")),
             "to_languages": translation.and_then(|p| p.get("to_languages")),
+        },
+        "libretranslate_api": {
+            "enabled": libre.and_then(|p| p.get("enabled")),
+            "http_port": libre.and_then(|p| p.get("http_port")),
+            "load_only": libre.and_then(|p| p.get("load_only")),
         },
     })
 }
