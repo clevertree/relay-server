@@ -146,3 +146,37 @@ Recommended client behaviour:
 | `RELAY_FEAT_TRANSLATION_PKGS='translate-en_es …'` | Argos packs to install during that run |
 
 Combine with **`RELAY_INSTALL_NONINTERACTIVE=1`** for cloud-init / CI (see **DEPLOY_LINODE.md**).
+
+---
+
+## Optional: LibreTranslate HTTP API (manual / ops)
+
+Some nodes run **[LibreTranslate](https://github.com/LibreTranslate/LibreTranslate)** alongside Relay for a **segment HTTP API** (many small **`POST /translate`** calls work well for book-scale jobs). This is **not** installed by **`install.sh`** today; it is an operational add-on (venv + systemd on the VM).
+
+### Calling it by domain (recommended)
+
+LibreTranslate listens on **`0.0.0.0:5588`** (or whatever port you choose). Clients should use the **same node FQDN** as Relay’s **`RELAY_PUBLIC_HOSTNAME`**, not the raw IP:
+
+- **Base URL:** **`http://{RELAY_PUBLIC_HOSTNAME}:5588`**
+- **Example:** **`http://atlanta1.relaygateway.net:5588`**
+
+As long as the **A record** for that name points at the server (same as Relay HTTP), **`curl`**, scripts, and apps can use the hostname directly; DNS resolves to the IP and the connection is identical to using the address literally.
+
+### Typical endpoints
+
+| Method | Path | Purpose |
+|--------|------|--------|
+| `GET` | `/languages` | Supported codes and targets |
+| `POST` | `/translate` | JSON body: `q`, `source`, `target`, `format` (`text` or `html`) |
+
+Example:
+
+```bash
+curl -sS -X POST "http://atlanta1.relaygateway.net:5588/translate" \
+  -H "Content-Type: application/json" \
+  -d '{"q":"Hello","source":"en","target":"ru","format":"text"}'
+```
+
+### TLS
+
+By default this is **HTTP on port 5588**. For HTTPS, terminate TLS in **Caddy/nginx** on **443** and proxy to **`127.0.0.1:5588`**, or use another front door you already run on the node.
