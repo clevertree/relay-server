@@ -650,14 +650,14 @@ append_relay_env_public_host() {
   echo "RELAY_PUBLIC_HOSTNAME=$h" >>"$f"
 }
 
-# Optional unique id for /api/config and ops (e.g. relay-atlanta2).
+# Optional unique id for /api/config and ops (e.g. relay-dallas1).
 append_relay_env_server_id() {
   local f="$INSTALL/relay.env"
   local id=""
   if [[ "${RELAY_INSTALL_NONINTERACTIVE:-}" == "1" ]]; then
     id="${RELAY_SERVER_ID:-}"
   elif [[ -t 0 ]]; then
-    read -r -p "RELAY_SERVER_ID — unique name for this node (e.g. relay-atlanta2; empty to skip): " id
+    read -r -p "RELAY_SERVER_ID — unique name for this node (e.g. relay-dallas1; empty to skip): " id
     id="${id// /}"
   fi
   [[ -z "$id" ]] && return 0

@@ -7,7 +7,7 @@
 # Add repos: extend BOOTSTRAP_CATALOG_NAMES and BOOTSTRAP_CATALOG_URLS in parallel.
 set -euo pipefail
 
-: "${RELAY_SERVER_ID:?Set RELAY_SERVER_ID (e.g. relay-atlanta2)}"
+: "${RELAY_SERVER_ID:?Set RELAY_SERVER_ID (e.g. relay-dallas1)}"
 DATA_ROOT="${RELAY_REPO_PATH:-/opt/relay/data}"
 EXT_DIR="${RELAY_NODE_EXTENSIONS_DIR:-/opt/relay/node_extensions}"
 ENV_OUT="${RELAY_ENV_FILE:-/opt/relay/relay.env}"

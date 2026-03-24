@@ -124,8 +124,8 @@ Set **`RELAY_PUBLIC_HOSTNAME`** to this node’s FQDN (required for **`Host: {re
 
 ```bash
 sudo RELAY_INSTALL_NONINTERACTIVE=1 RELAY_SKIP_VERCEL_DNS=1 \
-  RELAY_PUBLIC_HOSTNAME="atlanta2.relaygateway.net" \
-  RELAY_SERVER_ID="relay-atlanta2" \
+  RELAY_PUBLIC_HOSTNAME="dallas1.relaygateway.net" \
+  RELAY_SERVER_ID="relay-dallas1" \
   RELAY_MASTER_PEER_LIST="atlanta1.relaygateway.net" \
   RELAY_FEAT_PIPER=0 RELAY_FEAT_TRANSLATION=0 \
   ./install.sh install
@@ -194,7 +194,7 @@ Record **`git rev-parse main`** → put that SHA as **`anchor_commit`** for that
 **Interactive (TTY):** run **`relay-bootstrap.sh`** with no manifest — you get a checkbox-style list (**`[x]`** = clone). Defaults: **relay-template**, **relay-server**, **songwalker-library** (GitHub `clevertree/*`). Toggle with **`1` `2` `3`**, **`a`** = all, **`n`** = none, **Enter** = proceed.
 
 ```bash
-export RELAY_SERVER_ID=relay-atlanta2
+export RELAY_SERVER_ID=relay-dallas1
 sudo -u relay bash /opt/relay/.../relay-bootstrap.sh   # or from deploy tarball directory
 ```
 
@@ -207,7 +207,7 @@ RELAY_BOOTSTRAP_NONINTERACTIVE=1 RELAY_CATALOG_EXCLUDE=relay-server ./relay-boot
 **Manifest URL** (anchors + optional npm) still supported:
 
 ```bash
-export RELAY_SERVER_ID=relay-atlanta2
+export RELAY_SERVER_ID=relay-dallas1
 export RELAY_BOOTSTRAP_MANIFEST_URL=https://…/bootstrap.json
 ./relay-bootstrap.sh
 ```
