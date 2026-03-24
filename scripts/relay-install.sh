@@ -639,11 +639,45 @@ configure_vercel_dns_first() {
   log "Vercel DNS configured and verified for $fqdn"
 }
 
+# Writes RELAY_PUBLIC_HOSTNAME from Vercel-configured FQDN and/or RELAY_PUBLIC_HOSTNAME env
+# (needed when RELAY_SKIP_VERCEL_DNS=1 but Host-based routing still requires the node name).
 append_relay_env_public_host() {
-  [[ -z "$RELAY_CONFIGURED_PUBLIC_FQDN" ]] && return 0
   local f="$INSTALL/relay.env"
+  local h="${RELAY_CONFIGURED_PUBLIC_FQDN:-}"
+  [[ -z "$h" ]] && h="${RELAY_PUBLIC_HOSTNAME:-}"
+  [[ -z "$h" ]] && return 0
   grep -q '^RELAY_PUBLIC_HOSTNAME=' "$f" 2>/dev/null && return 0
-  echo "RELAY_PUBLIC_HOSTNAME=$RELAY_CONFIGURED_PUBLIC_FQDN" >>"$f"
+  echo "RELAY_PUBLIC_HOSTNAME=$h" >>"$f"
+}
+
+# Optional unique id for /api/config and ops (e.g. relay-atlanta2).
+append_relay_env_server_id() {
+  local f="$INSTALL/relay.env"
+  local id=""
+  if [[ "${RELAY_INSTALL_NONINTERACTIVE:-}" == "1" ]]; then
+    id="${RELAY_SERVER_ID:-}"
+  elif [[ -t 0 ]]; then
+    read -r -p "RELAY_SERVER_ID — unique name for this node (e.g. relay-atlanta2; empty to skip): " id
+    id="${id// /}"
+  fi
+  [[ -z "$id" ]] && return 0
+  grep -q '^RELAY_SERVER_ID=' "$f" 2>/dev/null && return 0
+  echo "RELAY_SERVER_ID=$id" >>"$f"
+}
+
+# Semicolon-separated peer hostnames for /api/config and future sync (RELAY_MASTER_PEER_LIST).
+append_relay_env_peer_list() {
+  local f="$INSTALL/relay.env"
+  local peers=""
+  if [[ "${RELAY_INSTALL_NONINTERACTIVE:-}" == "1" ]]; then
+    peers="${RELAY_MASTER_PEER_LIST:-}"
+  elif [[ -t 0 ]]; then
+    read -r -p "Other relay nodes already running (semicolon-separated FQDNs for sync/discovery; empty if none) [e.g. atlanta1.relaygateway.net]: " peers
+  fi
+  peers="${peers// /}"
+  [[ -z "$peers" ]] && return 0
+  grep -q '^RELAY_MASTER_PEER_LIST=' "$f" 2>/dev/null && return 0
+  echo "RELAY_MASTER_PEER_LIST=$peers" >>"$f"
 }
 
 do_install() {
@@ -674,6 +708,8 @@ do_install() {
   touch "$INSTALL/relay.env"
   chown relay:relay "$INSTALL/relay.env"
   append_relay_env_public_host
+  append_relay_env_server_id
+  append_relay_env_peer_list
   systemctl enable relay-server relay-git-daemon
   systemctl restart relay-git-daemon relay-server
   [[ "$piper_en" == "1" ]] && systemctl restart relay-tts-piper 2>/dev/null || true
@@ -802,6 +838,7 @@ case "${1:-install}" in
     echo "  install   — Vercel DNS first (unless skipped), then base deps; Piper + npm + translation prompts (or RELAY_INSTALL_NONINTERACTIVE=1)"
     echo "  DNS env: RELAY_PUBLIC_FQDN, VERCEL_API_TOKEN, optional VERCEL_TEAM_ID, RELAY_VERCEL_DOMAIN, RELAY_SKIP_VERCEL_DNS=1"
     echo "  Features env: RELAY_FEAT_PIPER, RELAY_FEAT_NPM_PKGS, RELAY_FEAT_TRANSLATION, RELAY_FEAT_TRANSLATION_PKGS (see docs/INSTALL_FEATURES.md)"
+    echo "  Node env: RELAY_SERVER_ID, RELAY_PUBLIC_HOSTNAME (if RELAY_SKIP_VERCEL_DNS=1), RELAY_MASTER_PEER_LIST (semicolon-separated peer FQDNs)"
     echo "  update    — refresh relay-server binaries from this directory; rescan feature inventory"
     echo "  repair    — fix perms, reinstall features from state/features.json (bootstraps minimal state if missing)"
     echo "  reconfigure-features — change Piper/npm/translation (only supported way to add/remove optional features)"

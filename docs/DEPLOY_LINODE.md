@@ -120,8 +120,15 @@ Optional: **`VERCEL_TEAM_ID=...`**, **`RELAY_VERCEL_DOMAIN=relaygateway.net`** (
 
 Skipping DNS (no token on host, or DNS managed manually):
 
+Set **`RELAY_PUBLIC_HOSTNAME`** to this node’s FQDN (required for **`Host: {repo}.{node}`** routing when Vercel did not append it). Optionally set **`RELAY_SERVER_ID`** and **`RELAY_MASTER_PEER_LIST`** (semicolon-separated peer FQDNs for **`/api/config`** and future sync).
+
 ```bash
-sudo RELAY_INSTALL_NONINTERACTIVE=1 RELAY_SKIP_VERCEL_DNS=1 RELAY_FEAT_PIPER=1 RELAY_FEAT_NPM_PKGS="songwalker-js" RELAY_FEAT_TRANSLATION=1 RELAY_FEAT_TRANSLATION_PKGS="translate-en_es" ./install.sh install
+sudo RELAY_INSTALL_NONINTERACTIVE=1 RELAY_SKIP_VERCEL_DNS=1 \
+  RELAY_PUBLIC_HOSTNAME="atlanta2.relaygateway.net" \
+  RELAY_SERVER_ID="relay-atlanta2" \
+  RELAY_MASTER_PEER_LIST="atlanta1.relaygateway.net" \
+  RELAY_FEAT_PIPER=0 RELAY_FEAT_TRANSLATION=0 \
+  ./install.sh install
 ```
 
 ---
